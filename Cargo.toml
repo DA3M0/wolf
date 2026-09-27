@@ -1,0 +1,11 @@
+[package]
+name = "wolf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+candle-core = "0.10.2"
+candle-transformers = "0.10.2"
+memmap2 = "0.9.11"
+tokenizers = { version = "0.22.2", default-features = false, features = ["onig"] }
+serde_json = "1.0.145"
