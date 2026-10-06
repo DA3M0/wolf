@@ -181,20 +181,21 @@ fn load_gguf_inner(path: &Path, options: ChatOptions) -> Result<LoadedChat, Stri
         .and_then(|value| value.to_string().ok())
         .map(String::as_str)
         .unwrap_or_default();
-    let chat_format = if template.contains("[USER]") && template.contains("[INST]") {
-        ChatFormat::UserInst
-    } else if architecture == "llama"
-        && content
-            .metadata
-            .get("tokenizer.ggml.pre")
-            .and_then(|value| value.to_string().ok())
-            .is_some_and(|value| value == "llama3")
-    {
-        ChatFormat::Llama3
-    } else {
-        ChatFormat::from_architecture(&architecture)?
-    };
+    let pre = content
+        .metadata
+        .get("tokenizer.ggml.pre")
+        .and_then(|value| value.to_string().ok())
+        .map(String::as_str)
+        .unwrap_or_default();
     let tokenizer = build_tokenizer(&content)?;
+    // Llama 3 系 GGUF 的 tokenizer.ggml.pre 常见为 "llama-bpe" 而非 "llama3";
+    // 词表里存在 <|start_header_id|> 或聊天模板含该标记时也按 Llama 3 处理。
+    let chat_format = detect_chat_format(
+        &architecture,
+        template,
+        pre,
+        tokenizer.token_to_id("<|start_header_id|>").is_some(),
+    )?;
     let eos = metadata_token_id(&content, "tokenizer.ggml.eot_token_id")
         .or_else(|| metadata_token_id(&content, "tokenizer.ggml.eos_token_id"))
         .ok_or_else(|| "GGUF 模型缺少可用的对话结束 token ID。".to_string())?;
@@ -437,6 +438,26 @@ fn gemma4_shard_names(index: &Value) -> Result<Vec<&str>, String> {
     Ok(shard_names)
 }
 
+/// 依据架构、聊天模板、tokenizer 类型和词表特征选择对话格式。
+/// Llama 3 系模型的 `tokenizer.ggml.pre` 常见为 "llama-bpe" 而非 "llama3"。
+fn detect_chat_format(
+    architecture: &str,
+    template: &str,
+    pre: &str,
+    has_llama3_header_token: bool,
+) -> Result<ChatFormat, String> {
+    if template.contains("[USER]") && template.contains("[INST]") {
+        return Ok(ChatFormat::UserInst);
+    }
+    if template.contains("<|start_header_id|>")
+        || (architecture == "llama"
+            && (pre == "llama3" || pre == "llama-bpe" || has_llama3_header_token))
+    {
+        return Ok(ChatFormat::Llama3);
+    }
+    ChatFormat::from_architecture(architecture)
+}
+
 fn build_tokenizer(content: &gguf_file::Content) -> Result<Tokenizer, String> {
     let model = content
         .metadata
@@ -571,6 +592,53 @@ mod tests {
             gemma4_shard_names(&index)
                 .unwrap_err()
                 .contains("文件名无效")
+        );
+    }
+
+    #[test]
+    fn detects_llama3_from_pre_tag_template_or_vocab() {
+        // Llama 3 系 GGUF 的 pre 常见为 "llama-bpe" 而非 "llama3"。
+        assert!(matches!(
+            detect_chat_format("llama", "", "llama-bpe", false),
+            Ok(ChatFormat::Llama3)
+        ));
+        assert!(matches!(
+            detect_chat_format("llama", "", "llama3", false),
+            Ok(ChatFormat::Llama3)
+        ));
+        assert!(matches!(
+            detect_chat_format("llama", "", "", true),
+            Ok(ChatFormat::Llama3)
+        ));
+        assert!(matches!(
+            detect_chat_format("llama", "{{@header}}<|start_header_id|>", "", false),
+            Ok(ChatFormat::Llama3)
+        ));
+        // Llama 2(旧版 SentencePiece)仍走 Llama2 模板。
+        assert!(matches!(
+            detect_chat_format("llama", "", "", false),
+            Ok(ChatFormat::Llama2)
+        ));
+        assert!(matches!(
+            detect_chat_format("llama", "", "spm", false),
+            Ok(ChatFormat::Llama2)
+        ));
+    }
+
+    #[test]
+    fn chat_template_markers_take_priority() {
+        assert!(matches!(
+            detect_chat_format("qwen2", "[USER] hi [/USER]\n[INST]", "", false),
+            Ok(ChatFormat::UserInst)
+        ));
+        assert!(matches!(
+            detect_chat_format("unknown-arch", "<|start_header_id|>", "", false),
+            Ok(ChatFormat::Llama3)
+        ));
+        assert!(
+            detect_chat_format("unknown-arch", "", "", false)
+                .unwrap_err()
+                .contains("暂不支持")
         );
     }
 }

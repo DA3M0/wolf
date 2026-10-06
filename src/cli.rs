@@ -5,9 +5,10 @@ use std::process::ExitCode;
 
 pub const DEFAULT_MAX_TOKENS_PER_TURN: usize = 256;
 pub const DEFAULT_CONTEXT_TOKENS: usize = 4096;
-pub const DEFAULT_TEMPERATURE: f64 = 0.8;
+/// 默认温度 0:确定性贪心输出;需要更多样化的回答时显式开启采样。
+pub const DEFAULT_TEMPERATURE: f64 = 0.0;
 pub const DEFAULT_TOP_P: f64 = 0.9;
-pub const DEFAULT_REPEAT_PENALTY: f32 = 1.1;
+pub const DEFAULT_REPEAT_PENALTY: f32 = 1.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatOptions {
@@ -309,11 +310,11 @@ mod tests {
     }
 
     #[test]
-    fn defaults_use_light_sampling() {
-        assert_eq!(DEFAULT_CHAT_OPTIONS.temperature, 0.8);
+    fn defaults_are_deterministic() {
+        assert_eq!(DEFAULT_CHAT_OPTIONS.temperature, 0.0);
         assert_eq!(DEFAULT_CHAT_OPTIONS.top_p, 0.9);
         assert_eq!(DEFAULT_CHAT_OPTIONS.top_k, 0);
-        assert_eq!(DEFAULT_CHAT_OPTIONS.repeat_penalty, 1.1);
+        assert_eq!(DEFAULT_CHAT_OPTIONS.repeat_penalty, 1.0);
         assert_eq!(DEFAULT_CHAT_OPTIONS.seed, None);
         assert_eq!(DEFAULT_CHAT_OPTIONS.system, None);
     }

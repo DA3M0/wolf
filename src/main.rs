@@ -91,10 +91,10 @@ fn print_help() {
 对话选项：\n\
   --threads N          CPU 线程数（默认使用 Rayon 默认值）\n\
   --max-tokens N       每轮最大生成 token 数（默认 256）\n\
-  --temperature F      采样温度（默认 0.8；设为 0 使用确定性贪心输出）\n\
-  --top-p F            核采样概率阈值（默认 0.9）\n\
+  --temperature F      采样温度（默认 0 = 确定性贪心；0.8 左右输出更多样但每次不同）\n\
+  --top-p F            核采样概率阈值（默认 0.9，仅在 temperature > 0 时生效）\n\
   --top-k N            top-k 采样候选数（默认关闭）\n\
-  --repeat-penalty F   重复惩罚（默认 1.1；设为 1 关闭）\n\
+  --repeat-penalty F   重复惩罚（默认 1 = 关闭）\n\
   --seed N             随机种子，用于复现同一次生成\n\
   --system \"...\"       系统提示词，仅在对话首轮注入\n\
 \n\
