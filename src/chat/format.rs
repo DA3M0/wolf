@@ -48,6 +48,30 @@ impl ChatFormat {
             Self::Phi3 => format!("<|user|>\n{prompt}<|end|>\n<|assistant|>\n"),
         }
     }
+
+    /// 首轮提示:按各格式的惯例注入系统提示。没有系统角色实现的格式
+    /// (Gemma、UserInst、Phi2)按官方/通用做法把系统提示并入首轮用户消息。
+    pub fn format_prompt_with_system(self, prompt: &str, system: &str) -> String {
+        match self {
+            Self::Llama2 => format!("[INST] <<SYS>>\n{system}\n<</SYS>>\n\n{prompt} [/INST]"),
+            Self::Llama3 => format!(
+                "<|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|>\
+                 <|start_header_id|>user<|end_header_id|>\n\n{prompt}<|eot_id|>\
+                 <|start_header_id|>assistant<|end_header_id|>\n\n"
+            ),
+            Self::Qwen | Self::Gemma4 => format!(
+                "<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+            ),
+            Self::Gemma => format!(
+                "<start_of_turn>user\n{system}\n\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+            ),
+            Self::UserInst => format!("[USER] {system}\n\n{prompt} [/USER]\n[INST]"),
+            Self::Phi2 => format!("Instruct: {system}\n{prompt}\nOutput:"),
+            Self::Phi3 => {
+                format!("<|system|>\n{system}<|end|>\n<|user|>\n{prompt}<|end|>\n<|assistant|>\n")
+            }
+        }
+    }
 }
 
 /// 常见对话结束标记，用于从 tokenizer 中定位可用的停止 token。
@@ -179,6 +203,34 @@ mod tests {
         assert_eq!(
             ChatFormat::Phi2.format_prompt("你好"),
             "Instruct: 你好\nOutput:"
+        );
+    }
+
+    #[test]
+    fn formats_first_turn_prompts_with_system() {
+        assert_eq!(
+            ChatFormat::Qwen.format_prompt_with_system("你好", "简洁作答"),
+            "<|im_start|>system\n简洁作答<|im_end|>\n<|im_start|>user\n你好<|im_end|>\n<|im_start|>assistant\n"
+        );
+        assert_eq!(
+            ChatFormat::Llama2.format_prompt_with_system("你好", "简洁作答"),
+            "[INST] <<SYS>>\n简洁作答\n<</SYS>>\n\n你好 [/INST]"
+        );
+        assert_eq!(
+            ChatFormat::Llama3.format_prompt_with_system("你好", "简洁作答"),
+            "<|start_header_id|>system<|end_header_id|>\n\n简洁作答<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n你好<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+        );
+        assert_eq!(
+            ChatFormat::Gemma.format_prompt_with_system("你好", "简洁作答"),
+            "<start_of_turn>user\n简洁作答\n\n你好<end_of_turn>\n<start_of_turn>model\n"
+        );
+        assert_eq!(
+            ChatFormat::Phi3.format_prompt_with_system("你好", "简洁作答"),
+            "<|system|>\n简洁作答<|end|>\n<|user|>\n你好<|end|>\n<|assistant|>\n"
+        );
+        assert_eq!(
+            ChatFormat::Phi2.format_prompt_with_system("你好", "简洁作答"),
+            "Instruct: 简洁作答\n你好\nOutput:"
         );
     }
 

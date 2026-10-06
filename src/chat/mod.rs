@@ -8,7 +8,7 @@ use crate::cli::ChatOptions;
 use candle_core::{Device, Tensor};
 use format::{build_stop_sequences, is_turn_start_marker, matching_stop_sequence};
 use model::{ChatModel, ChatSource};
-use sampling::select_next_token;
+use sampling::Sampler;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -36,6 +36,7 @@ fn chat_loop(
     } = settings;
     let stop_sequences = build_stop_sequences(&tokenizer, eos);
     let max_stop_len = stop_sequences.iter().map(Vec::len).max().unwrap_or(1);
+    let mut sampler = Sampler::new(&options);
     let mut input = String::new();
     let mut position = 0usize;
     let mut first_turn = true;
@@ -66,6 +67,7 @@ fn chat_loop(
         }
 
         let mut tokens = Vec::new();
+        let is_first_turn = first_turn;
         if first_turn {
             if add_bos && let Some(bos) = bos {
                 tokens.push(bos);
@@ -79,7 +81,11 @@ fn chat_loop(
                 tokens.push(bos);
             }
         }
-        let formatted = chat_format.format_prompt(prompt);
+        let formatted = if is_first_turn && let Some(system) = options.system.as_deref() {
+            chat_format.format_prompt_with_system(prompt, system)
+        } else {
+            chat_format.format_prompt(prompt)
+        };
         let encoded = tokenizer
             .encode(formatted, false)
             .map_err(|error| format!("无法编码输入文本：{error}"))?;
@@ -111,13 +117,14 @@ fn chat_loop(
         let mut decoder = tokenizer.decode_stream(true);
         let mut pending_tokens = VecDeque::new();
         let mut response_ids = Vec::new();
+        let mut recent = tokens.clone();
         let mut output = io::stdout().lock();
         let generation_started = Instant::now();
         let mut generated_count = 0usize;
         let mut stopped_at_turn_boundary = false;
         let mut matched_stop = Vec::new();
         for _ in 0..options.max_tokens {
-            let next = select_next_token(&logits)?;
+            let next = sampler.select(&logits, &recent)?;
             response_ids.push(next);
             pending_tokens.push_back(next);
             if let Some(stop_sequence) = matching_stop_sequence(&response_ids, &stop_sequences) {
@@ -145,6 +152,7 @@ fn chat_loop(
             if position >= context_limit {
                 break;
             }
+            recent.push(next);
             logits = model
                 .forward(
                     &Tensor::new(&[next], &Device::Cpu)

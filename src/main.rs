@@ -34,6 +34,10 @@ fn run(args: Vec<String>) -> Result<(), RunError> {
             print_formats();
             Ok(())
         }
+        "version" | "--version" | "-V" => {
+            println!("wolf {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "load" | "inspect" => {
             let (path, json, show_all) = cli::parse_load_args(&args[1..])?;
             runtime(inspect::inspect_model(&path, json, show_all))?;
@@ -81,15 +85,25 @@ fn print_help() {
   wolf load <模型文件> [--all] [--json]   加载并显示模型信息\n\
   wolf inspect <模型文件> [--all] [--json]（load 的别名）\n\
   wolf formats                            列出支持的格式\n\
+  wolf version                            显示版本（--version / -V）\n\
   wolf help                               显示帮助\n\
 \n\
 对话选项：\n\
-  --threads N       CPU 线程数（默认使用 Rayon 默认值）\n\
-  --max-tokens N    每轮最大生成 token 数（默认 256）\n\
+  --threads N          CPU 线程数（默认使用 Rayon 默认值）\n\
+  --max-tokens N       每轮最大生成 token 数（默认 256）\n\
+  --temperature F      采样温度（默认 0.8；设为 0 使用确定性贪心输出）\n\
+  --top-p F            核采样概率阈值（默认 0.9）\n\
+  --top-k N            top-k 采样候选数（默认关闭）\n\
+  --repeat-penalty F   重复惩罚（默认 1.1；设为 1 关闭）\n\
+  --seed N             随机种子，用于复现同一次生成\n\
+  --system \"...\"       系统提示词，仅在对话首轮注入\n\
 \n\
 示例：\n\
   wolf ./models/llama-2-7b-chat.Q4_K_M.gguf\n\
   wolf ./models/model.gguf --threads 8 --max-tokens 128\n\
+  wolf ./models/model.gguf --temperature 0.7 --top-k 50 --seed 42\n\
+  wolf ./models/model.gguf --system \"你是一个简洁的中文助手\"\n\
+  wolf ./models/model.gguf --temperature 0\n\
   wolf ./models/gemma-4-E2B-it/\n\
   wolf /data/models/llama.gguf\n\
   wolf chat \"C:\\\\models\\\\llama.gguf\"\n\
