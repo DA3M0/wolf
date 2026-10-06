@@ -486,7 +486,7 @@ fn print_json(path: &Path, file_size: usize, info: &ModelInfo) -> Result<(), Str
     Ok(())
 }
 
-fn format_size(size: u64) -> String {
+pub(crate) fn format_size(size: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = size as f64;
     let mut unit = 0;

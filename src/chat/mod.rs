@@ -12,11 +12,21 @@ use sampling::Sampler;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+
+/// Ctrl-C 标志:生成循环每个 token 检查一次,提示符处也会检查。
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+fn install_interrupt_handler() {
+    // 安装失败不致命:Ctrl-C 将回退为直接终止进程。
+    let _ = ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst));
+}
 
 pub fn chat(path: &Path, options: ChatOptions) -> Result<(), String> {
     let source = ChatSource::from_path(path)?;
     let loaded = source.load(options)?;
+    install_interrupt_handler();
     chat_loop(source, loaded)
 }
 
@@ -114,6 +124,11 @@ fn chat_loop(source: ChatSource, mut loaded: LoadedChat) -> Result<(), String> {
         if bytes_read == 0 {
             println!("\n已退出。");
             return Ok(());
+        }
+        if INTERRUPTED.swap(false, Ordering::SeqCst) {
+            // 提示符处的 Ctrl-C:读取已被回车结束,给出新提示符。
+            println!("（已取消输入；/exit 或 Ctrl-D 退出）");
+            continue;
         }
         let prompt = input.trim();
         if prompt == "/exit" || prompt == "/quit" {
@@ -223,6 +238,10 @@ fn chat_loop(source: ChatSource, mut loaded: LoadedChat) -> Result<(), String> {
         let mut stopped_at_turn_boundary = false;
         let mut matched_stop = Vec::new();
         for _ in 0..options.max_tokens {
+            if INTERRUPTED.swap(false, Ordering::SeqCst) {
+                eprintln!("\n[已中断本轮生成]");
+                break;
+            }
             let next = sampler.select(&logits, &recent)?;
             response_ids.push(next);
             pending_tokens.push_back(next);

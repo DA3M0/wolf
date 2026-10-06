@@ -1,6 +1,7 @@
 //! 模型加载：GGUF 对话模型与 Gemma 4 目录的构建。
 
 use crate::cli::{ChatOptions, DEFAULT_CONTEXT_TOKENS};
+use crate::inspect::format_size;
 use candle_core::quantized::{gguf_file, tokenizer::TokenizerFromGguf};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
@@ -11,8 +12,12 @@ use candle_transformers::models::{
 };
 use serde_json::Value;
 use std::fs::{self, File};
-use std::io::BufReader;
+use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 use tokenizers::AddedToken;
 use tokenizers::Tokenizer;
 use tokenizers::pre_tokenizers::metaspace::{Metaspace as MetaspacePreTokenizer, PrependScheme};
@@ -22,6 +27,45 @@ use super::format::ChatFormat;
 
 /// Gemma 4 目录的 EOS 候选,按优先级排列。
 const GEMMA4_EOS_CANDIDATES: &[&str] = &["<|im_end|>", "<end_of_turn>", "<|end_of_turn|>", "</s>"];
+
+/// 模型加载期间的等待提示:每隔一秒在 stderr 上刷新一次已等待秒数。
+struct LoadTicker {
+    done: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl LoadTicker {
+    fn start() -> Self {
+        let done = Arc::new(AtomicBool::new(false));
+        let done_thread = done.clone();
+        let handle = thread::spawn(move || {
+            let started = Instant::now();
+            while !done_thread.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_secs(1));
+                if done_thread.load(Ordering::Relaxed) {
+                    break;
+                }
+                eprint!("\r  已等待 {} 秒…", started.elapsed().as_secs());
+                let _ = io::stderr().flush();
+            }
+        });
+        Self {
+            done,
+            handle: Some(handle),
+        }
+    }
+
+    fn finish(mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        eprint!("\r{}", " ".repeat(40));
+        let _ = io::stderr().flush();
+        eprint!("\r");
+        let _ = io::stderr().flush();
+    }
+}
 
 pub struct ChatSettings {
     pub bos: Option<u32>,
@@ -63,6 +107,8 @@ pub struct LoadedChat {
     pub model: ChatModel,
     pub tokenizer: Tokenizer,
     pub settings: ChatSettings,
+    /// 加载来源的架构名,用于提示信息(如 "qwen3" 或 "Gemma 4 文本")。
+    pub architecture: String,
 }
 
 /// 对话模型的来源:GGUF 文件或 Gemma 4 模型目录。
@@ -94,7 +140,26 @@ impl ChatSource {
 }
 
 fn load_gguf(path: &Path, options: ChatOptions) -> Result<LoadedChat, String> {
-    println!("正在加载模型：{}", path.display());
+    let file_size = fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    println!(
+        "正在加载模型：{}（{}）",
+        path.display(),
+        format_size(file_size)
+    );
+    let started = Instant::now();
+    let ticker = LoadTicker::start();
+    let loaded = load_gguf_inner(path, options);
+    ticker.finish();
+    let loaded = loaded?;
+    println!(
+        "已加载 {} 模型（CPU，用时 {:.1} 秒）。输入 /exit 退出。",
+        loaded.architecture,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(loaded)
+}
+
+fn load_gguf_inner(path: &Path, options: ChatOptions) -> Result<LoadedChat, String> {
     let file = File::open(path).map_err(|error| format!("无法打开模型文件：{error}"))?;
     let mut reader = BufReader::new(file);
     let content = gguf_file::Content::read(&mut reader)
@@ -194,7 +259,6 @@ fn load_gguf(path: &Path, options: ChatOptions) -> Result<LoadedChat, String> {
         }
     };
 
-    println!("已加载 {architecture} 模型（CPU）。输入 /exit 退出。");
     Ok(LoadedChat {
         model,
         tokenizer,
@@ -206,11 +270,25 @@ fn load_gguf(path: &Path, options: ChatOptions) -> Result<LoadedChat, String> {
             add_bos,
             options,
         },
+        architecture,
     })
 }
 
 fn load_gemma4_directory(path: &Path, options: ChatOptions) -> Result<LoadedChat, String> {
     println!("正在加载 Gemma 4 模型目录：{}", path.display());
+    let started = Instant::now();
+    let ticker = LoadTicker::start();
+    let loaded = load_gemma4_directory_inner(path, options);
+    ticker.finish();
+    let loaded = loaded?;
+    println!(
+        "Gemma 4 文本模型已加载（CPU，用时 {:.1} 秒）。输入 /exit 退出。",
+        started.elapsed().as_secs_f64()
+    );
+    Ok(loaded)
+}
+
+fn load_gemma4_directory_inner(path: &Path, options: ChatOptions) -> Result<LoadedChat, String> {
     let config_path = path.join("config.json");
     let config_data = fs::read(&config_path)
         .map_err(|error| format!("无法读取 {}：{error}", config_path.display()))?;
@@ -257,6 +335,11 @@ fn load_gemma4_directory(path: &Path, options: ChatOptions) -> Result<LoadedChat
     }
 
     let weights = gemma4_safetensor_paths(path)?;
+    let total_weight_bytes: u64 = weights
+        .iter()
+        .filter_map(|weight| fs::metadata(weight).ok())
+        .map(|meta| meta.len())
+        .sum();
     let device = Device::Cpu;
     let var_builder = unsafe {
         VarBuilder::from_mmaped_safetensors(&weights, DType::F32, &device)
@@ -264,7 +347,6 @@ fn load_gemma4_directory(path: &Path, options: ChatOptions) -> Result<LoadedChat
     };
     let model = TextModel::new(&config, var_builder)
         .map_err(|error| format!("无法构建 Gemma 4 文本模型：{error}"))?;
-    println!("Gemma 4 文本模型已加载（CPU）。输入 /exit 退出。");
     Ok(LoadedChat {
         model: ChatModel::Gemma4(model),
         tokenizer,
@@ -276,6 +358,7 @@ fn load_gemma4_directory(path: &Path, options: ChatOptions) -> Result<LoadedChat
             add_bos: bos.is_some(),
             options,
         },
+        architecture: format!("Gemma 4 文本（权重 {}）", format_size(total_weight_bytes)),
     })
 }
 
