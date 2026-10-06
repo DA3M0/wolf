@@ -7,40 +7,98 @@ pub mod sampling;
 use crate::cli::ChatOptions;
 use candle_core::{Device, Tensor};
 use format::{build_stop_sequences, is_turn_start_marker, matching_stop_sequence};
-use model::{ChatModel, ChatSource};
+use model::{ChatSource, LoadedChat};
 use sampling::Sampler;
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::time::Instant;
-use tokenizers::Tokenizer;
 
 pub fn chat(path: &Path, options: ChatOptions) -> Result<(), String> {
     let source = ChatSource::from_path(path)?;
     let loaded = source.load(options)?;
-    chat_loop(loaded.model, loaded.tokenizer, loaded.settings)
+    chat_loop(source, loaded)
 }
 
-fn chat_loop(
-    mut model: ChatModel,
-    tokenizer: Tokenizer,
-    settings: model::ChatSettings,
+/// 截断历史并重载模型:candle 量化模型的 KV cache 没有公开的重置接口,
+/// 无法原地丢弃旧上下文,因此通过"重载模型 + 重放保留的轮次"重建会话。
+fn truncate_and_reload(
+    source: &ChatSource,
+    options: &ChatOptions,
+    loaded: &mut LoadedChat,
+    history: &mut Vec<Vec<u32>>,
+    position: &mut usize,
+    required: usize,
+    context_limit: usize,
 ) -> Result<(), String> {
-    let model::ChatSettings {
-        bos,
-        eos,
-        format: chat_format,
-        context_limit,
-        add_bos,
-        options,
-    } = settings;
-    let stop_sequences = build_stop_sequences(&tokenizer, eos);
+    if required > context_limit {
+        return Err(format!(
+            "单轮输入加生成长度需要 {required} tokens，超过模型上下文上限 {context_limit}，无法继续。"
+        ));
+    }
+    let budget = context_limit * 3 / 5;
+    let lens: Vec<usize> = history.iter().map(Vec::len).collect();
+    let keep = kept_turns(&lens, required, budget, context_limit);
+    let dropped = history.len() - keep;
+    println!("上下文接近上限：截断最早 {dropped} 轮对话并重新加载模型…");
+    let mut fresh = source.load(options.clone())?;
+    let replay = history[dropped..].concat();
+    if !replay.is_empty() {
+        fresh
+            .model
+            .forward(
+                &Tensor::new(replay.as_slice(), &Device::Cpu)
+                    .and_then(|t| t.unsqueeze(0))
+                    .map_err(|error| format!("无法创建历史重放张量：{error}"))?,
+                0,
+            )
+            .map_err(|error| format!("重放对话历史失败：{error}"))?;
+    }
+    *position = replay.len();
+    history.drain(..dropped);
+    *loaded = fresh;
+    Ok(())
+}
+
+/// 计算截断后保留的最近轮次数:优先按 60% 预算保留完整轮次,
+/// 若本轮输入(required = 输入 + 生成预留)仍放不下剩余空间,则继续舍弃。
+/// 返回值 ≤ history_lens.len();即使为 0,调用方也需先确认 required ≤ context_limit。
+fn kept_turns(
+    history_lens: &[usize],
+    required: usize,
+    budget: usize,
+    context_limit: usize,
+) -> usize {
+    let replay_len =
+        |count: usize| -> usize { history_lens[history_lens.len() - count..].iter().sum() };
+    let mut keep = history_lens.len();
+    while keep > 0 && (replay_len(keep) > budget || required > context_limit - replay_len(keep)) {
+        keep -= 1;
+    }
+    keep
+}
+
+fn print_chat_help() {
+    println!(
+        "对话内命令：\n  \
+         /clear  清空对话历史并重新加载模型\n  \
+         /help   显示本帮助\n  \
+         /exit   退出（或 /quit、Ctrl-D）"
+    );
+}
+
+fn chat_loop(source: ChatSource, mut loaded: LoadedChat) -> Result<(), String> {
+    let options = loaded.settings.options.clone();
+    let stop_sequences = build_stop_sequences(&loaded.tokenizer, loaded.settings.eos);
     let max_stop_len = stop_sequences.iter().map(Vec::len).max().unwrap_or(1);
     let mut sampler = Sampler::new(&options);
     let mut input = String::new();
     let mut position = 0usize;
+    // 每轮实际喂入模型的 token(提示 + 生成的已喂入部分),用于截断后精确重放。
+    let mut history: Vec<Vec<u32>> = Vec::new();
     let mut first_turn = true;
-    let mut previous_stop = Vec::new();
+    let mut previous_stop: Vec<u32> = Vec::new();
+    let mut usage_warned = false;
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
 
@@ -58,13 +116,33 @@ fn chat_loop(
             return Ok(());
         }
         let prompt = input.trim();
-        if prompt == "/exit" {
+        if prompt == "/exit" || prompt == "/quit" {
             println!("已退出。");
             return Ok(());
+        }
+        if prompt == "/clear" {
+            loaded = source.load(options.clone())?;
+            position = 0;
+            history.clear();
+            first_turn = true;
+            previous_stop.clear();
+            usage_warned = false;
+            println!("已清空对话历史。");
+            continue;
+        }
+        if prompt == "/help" {
+            print_chat_help();
+            continue;
         }
         if prompt.is_empty() {
             continue;
         }
+
+        let chat_format = loaded.settings.format;
+        let context_limit = loaded.settings.context_limit;
+        let add_bos = loaded.settings.add_bos;
+        let bos = loaded.settings.bos;
+        let reserve = options.max_tokens;
 
         let mut tokens = Vec::new();
         let is_first_turn = first_turn;
@@ -75,7 +153,7 @@ fn chat_loop(
             first_turn = false;
         } else {
             tokens.extend_from_slice(&previous_stop);
-            if matches!(chat_format, format::ChatFormat::Llama2)
+            if chat_format == format::ChatFormat::Llama2
                 && let Some(bos) = bos
             {
                 tokens.push(bos);
@@ -86,7 +164,8 @@ fn chat_loop(
         } else {
             chat_format.format_prompt(prompt)
         };
-        let encoded = tokenizer
+        let encoded = loaded
+            .tokenizer
             .encode(formatted, false)
             .map_err(|error| format!("无法编码输入文本：{error}"))?;
         tokens.extend_from_slice(encoded.get_ids());
@@ -94,9 +173,28 @@ fn chat_loop(
             eprintln!("输入未能转换为模型 token，请重试。");
             continue;
         }
-        if position.saturating_add(tokens.len()) >= context_limit {
-            eprintln!("已达到模型上下文上限（{context_limit} tokens）。请退出并重新启动对话。");
-            continue;
+
+        if position + tokens.len() + reserve > context_limit {
+            let required = tokens.len() + reserve;
+            if let Err(message) = truncate_and_reload(
+                &source,
+                &options,
+                &mut loaded,
+                &mut history,
+                &mut position,
+                required,
+                context_limit,
+            ) {
+                eprintln!("{message}");
+                continue;
+            }
+            usage_warned = false;
+        }
+        if !usage_warned && (position + tokens.len() + reserve) * 10 > context_limit * 8 {
+            usage_warned = true;
+            eprintln!(
+                "注意：上下文用量已超过 80%（上限 {context_limit} tokens），超限后较早的对话轮次会被自动截断。"
+            );
         }
         previous_stop.clear();
 
@@ -104,7 +202,8 @@ fn chat_loop(
         io::stdout()
             .flush()
             .map_err(|error| format!("无法刷新输出：{error}"))?;
-        let mut logits = model
+        let mut logits = loaded
+            .model
             .forward(
                 &Tensor::new(tokens.as_slice(), &Device::Cpu)
                     .and_then(|t| t.unsqueeze(0))
@@ -113,11 +212,11 @@ fn chat_loop(
             )
             .map_err(|error| format!("模型推理失败：{error}"))?;
         position += tokens.len();
+        let mut recent = tokens.clone();
 
-        let mut decoder = tokenizer.decode_stream(true);
+        let mut decoder = loaded.tokenizer.decode_stream(true);
         let mut pending_tokens = VecDeque::new();
         let mut response_ids = Vec::new();
-        let mut recent = tokens.clone();
         let mut output = io::stdout().lock();
         let generation_started = Instant::now();
         let mut generated_count = 0usize;
@@ -153,7 +252,8 @@ fn chat_loop(
                 break;
             }
             recent.push(next);
-            logits = model
+            logits = loaded
+                .model
                 .forward(
                     &Tensor::new(&[next], &Device::Cpu)
                         .and_then(|tensor| tensor.unsqueeze(0))
@@ -163,6 +263,7 @@ fn chat_loop(
                 .map_err(|error| format!("模型推理失败：{error}"))?;
             position += 1;
         }
+        history.push(std::mem::take(&mut recent));
         let stop_len = if stopped_at_turn_boundary {
             matched_stop.len()
         } else {
@@ -190,8 +291,41 @@ fn chat_loop(
                 generated_count as f64 / elapsed
             );
         }
-        if stopped_at_turn_boundary && !is_turn_start_marker(&tokenizer, &matched_stop) {
+        if stopped_at_turn_boundary && !is_turn_start_marker(&loaded.tokenizer, &matched_stop) {
             previous_stop = matched_stop;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kept_turns;
+
+    const CONTEXT_LIMIT: usize = 100;
+    const BUDGET: usize = 60; // 3/5 上限
+
+    #[test]
+    fn keeps_recent_turns_within_budget() {
+        // 5 轮 × 10 tokens = 50,整体在预算内。
+        assert_eq!(kept_turns(&[10; 5], 20, BUDGET, CONTEXT_LIMIT), 5);
+    }
+
+    #[test]
+    fn drops_oldest_turns_to_fit_budget() {
+        // 3 轮 × 25 = 75 超出预算 60,保留最近 2 轮。
+        assert_eq!(kept_turns(&[25, 25, 25], 20, BUDGET, CONTEXT_LIMIT), 2);
+    }
+
+    #[test]
+    fn shrinks_further_when_incoming_needs_room() {
+        // 保留 2 轮后剩余 50,能容纳 required=45。
+        assert_eq!(kept_turns(&[25, 25, 25], 45, BUDGET, CONTEXT_LIMIT), 2);
+        // required=55 时剩余 50 不够,再舍一轮。
+        assert_eq!(kept_turns(&[25, 25, 25], 55, BUDGET, CONTEXT_LIMIT), 1);
+    }
+
+    #[test]
+    fn may_drop_everything_for_oversized_history() {
+        assert_eq!(kept_turns(&[70], 20, BUDGET, CONTEXT_LIMIT), 0);
     }
 }
