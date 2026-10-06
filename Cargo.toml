@@ -2,6 +2,19 @@
 name = "wolf"
 version = "0.1.0"
 edition = "2024"
+description = "Local LLM chat and model inspection CLI (GGUF / Gemma 4, CPU inference via Candle)"
+license = "Apache-2.0"
+repository = "https://github.com/DA3M0/wolf"
+readme = "README.md"
+keywords = ["llm", "gguf", "candle", "chat", "cli"]
+categories = ["command-line-utilities"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+debug = "line-tables-only"
 
 [dependencies]
 candle-core = "0.11.0"
