@@ -1,6 +1,6 @@
 # wolf
 
-`wolf` 是一个 Rust 本地模型加载和对话命令行工具。最简单的用法是把模型文件路径作为唯一参数：
+`wolf` 是一个 Rust 本地模型加载和对话命令行工具。GGUF 推理由 llama.cpp（llama-cpp-4 绑定）提供；Gemma 4 Safetensors 目录推理仍使用 Candle。最简单的用法是把模型文件路径作为唯一参数：
 
 ```sh
 wolf ./models/llama-3-8b-instruct.Q4_K_M.gguf
@@ -19,6 +19,14 @@ cargo build --release
 ```
 
 生成的可执行文件为 `target/release/wolf`。以下命令假定它已加入 `PATH`；如果没有，请使用 `./target/release/wolf` 代替 `wolf`。
+
+默认构建使用 CPU。Linux Vulkan 构建需要 Vulkan 开发库和 GLSL 编译器：
+
+```sh
+cargo build --release --features vulkan
+```
+
+也可通过 `--features cuda` 构建 CUDA 后端。
 
 查询版本：
 
@@ -89,7 +97,7 @@ wolf chat /data/models/model.gguf
 
 | 选项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--threads N` | Rayon 默认值 | CPU 推理线程数 |
+| `--threads N` | llama.cpp 默认值 | 推理线程数（GGUF）；Safetensors 目录推理使用 CPU 线程 |
 | `--max-tokens N` | 256 | 每轮最大生成 token 数 |
 | `--temperature F` | 0（贪心） | 采样温度；大于 0 时开启随机采样，同一输入每次输出会不同 |
 | `--top-p F` | 0.9 | 核采样概率阈值，仅在 `--temperature` > 0 时生效 |
@@ -146,12 +154,14 @@ wolf inspect ./models/model.safetensors --json
 
 ## 支持范围
 
-- **对话推理：** GGUF CPU 推理支持 `llama`、`qwen2`、`qwen3`、`qwen3moe`、`gemma`、`gemma2`、`gemma3`、`phi2` 和 `phi3` 架构。Gemma 4 支持 Hugging Face **文本模型目录**：目录需包含 `config.json`、`tokenizer.json` 和 `.safetensors` 权重；支持分片 `model.safetensors.index.json`。Gemma 4 使用 Candle 0.11 文本模型实现和 CPU 推理，不启用视觉/音频输入。目录权重支持 `model.safetensors` 或索引文件 `model.safetensors.index.json` 指定的多个分片。GGUF 根据 `general.architecture` 选择对应 Candle 模型；支持 LLaMA SentencePiece 和 GGUF GPT-2/BPE tokenizer，以及对应的 LLaMA、Llama 3、ChatML、Gemma 和 Phi 对话提示格式。
+- **对话推理：** GGUF 由 llama.cpp 推理，可使用其支持的 GGUF 架构与模型内置聊天模板；默认 CPU，可通过 Vulkan/CUDA Cargo feature 构建相应后端。Gemma 4 也可使用 Hugging Face **文本模型目录**：目录需包含 `config.json`、`tokenizer.json` 和 `.safetensors` 权重；支持分片 `model.safetensors.index.json`。该目录路径目前使用 Candle 0.11 CPU 文本模型，不启用视觉/音频输入。
 - **文件检查：** GGUF v2/v3、Safetensors；展示元数据和张量信息（含 GGUF 张量字节大小估算），校验头部、数据范围与张量重叠。
-- **暂不支持：** Gemma 4 GGUF、Gemma 4 图像/音频输入、尚未实现的 GGUF 架构（如 Mistral、DeepSeek、GLM）、其他模型的 Safetensors 推理、GPU 推理、ONNX、PyTorch `.bin`/pickle。仅支持的 GGUF 架构才可推理；架构虽然受支持，仍要求模型张量命名、量化类型和 tokenizer 元数据符合相应实现。优先使用 instruction/chat 微调模型。
+- **暂不支持：** Gemma 4 图像/音频输入、Safetensors 目录（Gemma 4 除外）推理、ONNX、PyTorch `.bin`/pickle。GGUF 的具体架构和量化类型支持范围取决于 llama.cpp 版本；优先使用 instruction/chat 微调模型。
 
 大型模型的加载和 CPU 推理需要足够内存，速度取决于模型大小和设备。量化模型通常更适合普通本地机器。
 
 ## 许可证
 
 本项目以 [Apache-2.0](LICENSE) 许可证发布。
+
+GGUF 推理由 llama.cpp 提供（MIT 许可证）；Rust 绑定 `llama-cpp-4` 使用 MIT 或 Apache-2.0 许可证。分发时还须保留相应上游版权和许可证声明。

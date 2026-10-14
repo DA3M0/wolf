@@ -1,6 +1,7 @@
 //! 多轮对话编排:加载模型并驱动生成循环。
 
 pub mod format;
+mod llama;
 pub mod model;
 pub mod sampling;
 
@@ -24,6 +25,9 @@ fn install_interrupt_handler() {
 }
 
 pub fn chat(path: &Path, options: ChatOptions) -> Result<(), String> {
+    if path.extension().and_then(|extension| extension.to_str()) == Some("gguf") {
+        return llama::chat(path, options);
+    }
     let source = ChatSource::from_path(path)?;
     let loaded = source.load(options)?;
     install_interrupt_handler();

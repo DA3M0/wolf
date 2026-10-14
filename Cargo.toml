@@ -2,11 +2,11 @@
 name = "wolf"
 version = "0.1.0"
 edition = "2024"
-description = "Local LLM chat and model inspection CLI (GGUF / Gemma 4, CPU inference via Candle)"
+description = "Local LLM chat and model inspection CLI powered by llama.cpp"
 license = "Apache-2.0"
 repository = "https://github.com/DA3M0/wolf"
 readme = "README.md"
-keywords = ["llm", "gguf", "candle", "chat", "cli"]
+keywords = ["llm", "gguf", "llama-cpp", "chat", "cli"]
 categories = ["command-line-utilities"]
 
 [profile.release]
@@ -16,11 +16,19 @@ codegen-units = 1
 [profile.dev]
 debug = "line-tables-only"
 
+[features]
+default = ["openmp"]
+openmp = ["llama-cpp-4/openmp"]
+vulkan = ["llama-cpp-4/vulkan"]
+cuda = ["llama-cpp-4/cuda"]
+
 [dependencies]
 candle-core = "0.11.0"
 candle-nn = "0.11.0"
 candle-transformers = "0.11.0"
 ctrlc = "3"
+encoding_rs = "0.8"
+llama-cpp-4 = { version = "0.8.0", default-features = false }
 memmap2 = "0.9.11"
 rayon = "1.12.0"
 tokenizers = { version = "0.22.2", default-features = false, features = ["onig"] }

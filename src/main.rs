@@ -68,8 +68,8 @@ fn runtime<T>(result: Result<T, String>) -> Result<T, RunError> {
 
 fn print_formats() {
     println!("当前支持的权重格式：");
-    println!("  .gguf              对话推理（LLaMA、Qwen、Gemma、Phi 系 CPU）和模型信息检查");
-    println!("  Gemma 4 模型目录  CPU 文本推理（Safetensors 权重）");
+    println!("  .gguf              llama.cpp 对话推理和模型信息检查（默认 CPU）");
+    println!("  Gemma 4 模型目录  Candle CPU 文本推理（Safetensors 权重）");
     println!("  .safetensors       模型信息检查（其他模型暂不支持推理）");
 
     println!("\nGemma 4 目录需包含 config.json、tokenizer.json 和 Safetensors 权重。");
@@ -89,7 +89,7 @@ fn print_help() {
   wolf help                               显示帮助\n\
 \n\
 对话选项：\n\
-  --threads N          CPU 线程数（默认使用 Rayon 默认值）\n\
+  --threads N          推理线程数（默认由后端决定）\n\
   --max-tokens N       每轮最大生成 token 数（默认 256）\n\
   --temperature F      采样温度（默认 0 = 确定性贪心；0.8 左右输出更多样但每次不同）\n\
   --top-p F            核采样概率阈值（默认 0.9，仅在 temperature > 0 时生效）\n\
@@ -111,6 +111,6 @@ fn print_help() {
   wolf load ./model.gguf --all\n\
   wolf inspect ./model.safetensors --json\n\
 \n\
-对话中输入 /exit 退出。支持 LLaMA、Qwen、Gemma、Phi 系 GGUF 和 Gemma 4 Safetensors 目录的 CPU 推理。"
+对话中输入 /exit 退出。GGUF 推理由 llama.cpp 提供；Gemma 4 Safetensors 目录使用 Candle CPU 推理。"
     );
 }
