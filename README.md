@@ -20,11 +20,16 @@ cargo build --release
 
 生成的可执行文件为 `target/release/wolf`。以下命令假定它已加入 `PATH`；如果没有，请使用 `./target/release/wolf` 代替 `wolf`。
 
-默认构建使用 CPU。Linux Vulkan 构建需要 Vulkan 开发库和 GLSL 编译器：
+默认构建使用 CPU。Vulkan 是可选的 GPU 后端；构建机需要 C/C++ 构建工具、CMake，以及 Vulkan SDK（包含 Vulkan headers、loader 和 `glslc` GLSL 编译器）。例如 Ubuntu/Debian 可安装：
 
 ```sh
+sudo apt install build-essential cmake libvulkan-dev glslc
 cargo build --release --features vulkan
 ```
+
+Windows 请先安装 [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home)，并确保 MSVC C++ 构建工具可用。macOS 需安装 LunarG Vulkan SDK/MoltenVK，并设置 `VULKAN_SDK`；若构建时 SDK 不可用，该依赖会回退到 Metal 后端。其他 Linux 发行版请安装对应的 Vulkan 开发包和 `glslc`。
+
+运行时还需要有 Vulkan 驱动的兼容 GPU 和已安装的驱动/loader；仅启用此 feature 不会自动提供 GPU 或驱动。下载的默认发布二进制使用 CPU，Vulkan 用户需在安装好上述依赖的环境中自行构建。
 
 也可通过 `--features cuda` 构建 CUDA 后端。
 
