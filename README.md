@@ -20,18 +20,24 @@ cargo build --release
 
 生成的可执行文件为 `target/release/wolf`。以下命令假定它已加入 `PATH`；如果没有，请使用 `./target/release/wolf` 代替 `wolf`。
 
-默认构建使用 CPU。Vulkan 是可选的 GPU 后端；构建机需要 C/C++ 构建工具、CMake，以及 Vulkan SDK（包含 Vulkan headers、loader 和 `glslc` GLSL 编译器）。例如 Ubuntu/Debian 可安装：
+默认构建使用 CPU；项目发布的预编译版本也仅包含 CPU 后端。GPU 后端需在安装相应工具链/SDK 后自行编译。Vulkan 是推荐的跨平台 GPU 后端，使用 `vulkan` feature 显式启用。构建机需要 C/C++ 构建工具、CMake，以及 Vulkan SDK（包含 Vulkan headers、loader 和 `glslc` GLSL 编译器）。例如 Ubuntu/Debian 可安装：
 
 ```sh
 sudo apt install build-essential cmake libvulkan-dev glslc
 cargo build --release --features vulkan
 ```
 
-Windows 请先安装 [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home)，并确保 MSVC C++ 构建工具可用。macOS 需安装 LunarG Vulkan SDK/MoltenVK，并设置 `VULKAN_SDK`；若构建时 SDK 不可用，该依赖会回退到 Metal 后端。其他 Linux 发行版请安装对应的 Vulkan 开发包和 `glslc`。
+Windows 请先安装 [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home)，并确保 MSVC C++ 构建工具可用。macOS 可使用 Metal feature；若使用 Vulkan，需安装 LunarG Vulkan SDK/MoltenVK 并设置 `VULKAN_SDK`。若构建时 macOS 上的 Vulkan SDK 不可用，底层依赖会回退到 Metal。其他 Linux 发行版请安装对应的 Vulkan 开发包和 `glslc`。
 
-运行时还需要有 Vulkan 驱动的兼容 GPU 和已安装的驱动/loader；仅启用此 feature 不会自动提供 GPU 或驱动。下载的默认发布二进制使用 CPU，Vulkan 用户需在安装好上述依赖的环境中自行构建。
+其他 GPU 后端同样需要在本机安装相应工具链后自行构建：
 
-也可通过 `--features cuda` 构建 CUDA 后端。
+```sh
+cargo build --release --features cuda   # NVIDIA CUDA
+cargo build --release --features rocm   # AMD ROCm（底层 HIP）
+cargo build --release --features metal  # Apple Metal（macOS）
+```
+
+运行时还需要兼容的 GPU 和已安装的驱动/运行库；启用 feature 不会自动提供 GPU 或驱动。具体 SDK 支持范围由 llama.cpp 后端决定。oneAPI/SYCL 暂不提供 feature：当前 `llama-cpp-4` 绑定尚未暴露该构建选项。
 
 查询版本：
 
@@ -165,7 +171,7 @@ wolf inspect ./models/model.safetensors --json
 
 ## 支持范围
 
-- **对话推理：** 仅支持 GGUF，由 llama.cpp 推理，可使用其支持的 GGUF 架构与模型内置聊天模板；默认 CPU，可通过 Vulkan/CUDA Cargo feature 构建相应后端。
+- **对话推理：** 仅支持 GGUF，由 llama.cpp 推理，可使用其支持的 GGUF 架构与模型内置聊天模板；默认 CPU，可通过 Vulkan/CUDA/ROCm/Metal Cargo feature 自行构建 GPU 后端。oneAPI/SYCL 暂未支持。
 - **文件检查：** GGUF v2/v3、Safetensors；展示元数据和张量信息（含 GGUF 张量字节大小估算），校验头部、数据范围与张量重叠。
 - **暂不支持：** Safetensors 推理、ONNX、PyTorch `.bin`/pickle。GGUF 的具体架构和量化类型支持范围取决于 llama.cpp 版本；优先使用 instruction/chat 微调模型。
 
