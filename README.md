@@ -1,6 +1,6 @@
 # wolf
 
-`wolf` 是一个 Rust 本地模型加载和对话命令行工具。GGUF 推理由 llama.cpp（llama-cpp-4 绑定）提供；Gemma 4 Safetensors 目录推理仍使用 Candle。最简单的用法是把模型文件路径作为唯一参数：
+`wolf` 是一个 Rust 本地 GGUF 模型聊天和检查命令行工具。GGUF 对话推理由 llama.cpp（llama-cpp-4 绑定）提供；Safetensors 文件仅支持结构检查，不用于推理。最简单的用法是把模型文件路径作为唯一参数：
 
 ```sh
 wolf ./models/llama-3-8b-instruct.Q4_K_M.gguf
@@ -47,9 +47,6 @@ wolf ./models/Qwen3-8B-Instruct-Q4_K_M.gguf
 wolf ./models/gemma-3-4b-it-Q4_K_M.gguf
 wolf ./models/Phi-3-mini-4k-instruct.Q4_K_M.gguf
 
-# Gemma 4 使用包含配置、tokenizer 和 Safetensors 权重的 Hugging Face 模型目录
-wolf ./models/gemma-4-E2B-it
-
 # 调整线程数、每轮回答长度
 wolf ./models/model.gguf --threads 8 --max-tokens 128
 
@@ -61,6 +58,12 @@ wolf ./models/model.gguf --temperature 0
 
 # 设置系统提示词（仅在对话首轮注入）
 wolf ./models/model.gguf --system "你是一个简洁的中文助手"
+
+# 保存和恢复命名上下文
+# 在聊天提示符输入：/save work
+wolf chat ./models/model.gguf --context work
+wolf context list
+wolf context delete work
 
 # Linux/macOS，绝对路径
 wolf /home/alice/models/model.gguf
@@ -97,7 +100,7 @@ wolf chat /data/models/model.gguf
 
 | 选项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--threads N` | llama.cpp 默认值 | 推理线程数（GGUF）；Safetensors 目录推理使用 CPU 线程 |
+| `--threads N` | llama.cpp 默认值 | GGUF 推理线程数 |
 | `--max-tokens N` | 256 | 每轮最大生成 token 数 |
 | `--temperature F` | 0（贪心） | 采样温度；大于 0 时开启随机采样，同一输入每次输出会不同 |
 | `--top-p F` | 0.9 | 核采样概率阈值，仅在 `--temperature` > 0 时生效 |
@@ -116,15 +119,18 @@ wolf chat /data/models/model.gguf
 | --- | --- |
 | `/exit`、`/quit` | 退出对话 |
 | `/clear` | 清空对话历史并重新加载模型（系统提示词会在下一轮重新注入） |
+| `/save <名称>` | 保存或更新当前对话上下文 |
 | `/help` | 显示对话内命令帮助 |
 
 生成过程中按 `Ctrl-C` 只会中断当前这轮回答，会话保留，可以继续提问；在 `>` 提示符处按 `Ctrl-C` 会取消当前输入并给出新提示符。`Ctrl-D`（输入为空时按回车等同于 EOF）退出程序。
 
 ### 5. 上下文管理
 
-上下文用量达到模型上限的 80% 时会给出警告。继续对话导致当前轮放不下时，wolf 会自动截断最早的对话轮次、重新加载模型并把最近的历史一次性重放（重放结果与连续对话等价），不需要手动重启。单轮输入加生成长度超过整个上下文窗口时，会提示缩短输入。
+聊天中使用 `/save <名称>` 保存完整对话；之后用 `wolf chat <模型路径> --context <名称>` 恢复。恢复时模型路径必须匹配；省略推理选项会自动使用存档设置，显式指定推理选项时必须与存档设置一致。`wolf context list` 列出存档，`wolf context delete <名称>` 删除存档。可使用 `--context-dir <路径>` 覆盖默认存储目录，该选项可用于聊天和上下文管理命令。
 
-截断重放会重新加载模型，大模型上会花费与启动时相当的加载时间；`/clear` 也走同样的重载逻辑。
+默认存档目录为 Linux 上的 `$XDG_DATA_HOME/wolf/contexts`（未设置时为 `~/.local/share/wolf/contexts`）、macOS 上的 `~/Library/Application Support/wolf/contexts`，以及 Windows 上的 `%LOCALAPPDATA%/wolf/contexts`（回退到 `%APPDATA%`）。存档使用带版本号的 JSON；GGUF 对话恢复时会按 llama.cpp 聊天模板重新构造对话。
+
+上下文用量接近模型上限时，wolf 会自动截断最早的完整对话轮次，再由 llama.cpp 根据剩余历史重新构造提示。单轮输入加生成长度超过整个上下文窗口时，会提示缩短输入。`/clear` 清除对话历史及 llama.cpp 的 KV cache。
 
 ### 6. 检查模型文件
 
@@ -154,9 +160,9 @@ wolf inspect ./models/model.safetensors --json
 
 ## 支持范围
 
-- **对话推理：** GGUF 由 llama.cpp 推理，可使用其支持的 GGUF 架构与模型内置聊天模板；默认 CPU，可通过 Vulkan/CUDA Cargo feature 构建相应后端。Gemma 4 也可使用 Hugging Face **文本模型目录**：目录需包含 `config.json`、`tokenizer.json` 和 `.safetensors` 权重；支持分片 `model.safetensors.index.json`。该目录路径目前使用 Candle 0.11 CPU 文本模型，不启用视觉/音频输入。
+- **对话推理：** 仅支持 GGUF，由 llama.cpp 推理，可使用其支持的 GGUF 架构与模型内置聊天模板；默认 CPU，可通过 Vulkan/CUDA Cargo feature 构建相应后端。
 - **文件检查：** GGUF v2/v3、Safetensors；展示元数据和张量信息（含 GGUF 张量字节大小估算），校验头部、数据范围与张量重叠。
-- **暂不支持：** Gemma 4 图像/音频输入、Safetensors 目录（Gemma 4 除外）推理、ONNX、PyTorch `.bin`/pickle。GGUF 的具体架构和量化类型支持范围取决于 llama.cpp 版本；优先使用 instruction/chat 微调模型。
+- **暂不支持：** Safetensors 推理、ONNX、PyTorch `.bin`/pickle。GGUF 的具体架构和量化类型支持范围取决于 llama.cpp 版本；优先使用 instruction/chat 微调模型。
 
 大型模型的加载和 CPU 推理需要足够内存，速度取决于模型大小和设备。量化模型通常更适合普通本地机器。
 

@@ -1,6 +1,7 @@
 //! GGUF chat powered by llama.cpp through llama-cpp-4.
 
 use crate::cli::{ChatOptions, DEFAULT_CONTEXT_TOKENS};
+use crate::context::{ContextArchive, ContextStore, ConversationTurn};
 use llama_cpp_4::prelude::*;
 use std::io::{self, BufRead, Write};
 use std::num::NonZeroU32;
@@ -11,7 +12,12 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 const BATCH_SIZE: usize = 512;
 
-pub fn chat(path: &Path, options: ChatOptions) -> Result<(), String> {
+pub fn chat(
+    path: &Path,
+    options: ChatOptions,
+    archive: ContextArchive,
+    store: ContextStore,
+) -> Result<(), String> {
     let mut backend =
         LlamaBackend::init().map_err(|error| format!("无法初始化 llama.cpp：{error}"))?;
     backend.void_logs();
@@ -34,15 +40,27 @@ pub fn chat(path: &Path, options: ChatOptions) -> Result<(), String> {
     ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
         .map_err(|error| format!("无法安装 Ctrl-C 处理器：{error}"))?;
     println!("已加载 llama.cpp GGUF 模型。输入 /exit 退出。");
-    chat_loop(&model, &mut context, &options)
+    chat_loop(&model, &mut context, &options, archive, store)
 }
 
 fn chat_loop(
     model: &LlamaModel,
     context: &mut LlamaContext<'_>,
     options: &ChatOptions,
+    mut archive: ContextArchive,
+    store: ContextStore,
 ) -> Result<(), String> {
-    let mut messages = Vec::<LlamaChatMessage>::new();
+    let mut messages = Vec::with_capacity(archive.turns.len() * 2);
+    for turn in &archive.turns {
+        messages.push(
+            LlamaChatMessage::new("user".into(), turn.user.clone().into())
+                .map_err(|error| format!("无法恢复上下文中的用户消息：{error}"))?,
+        );
+        messages.push(
+            LlamaChatMessage::new("assistant".into(), turn.assistant.clone().into())
+                .map_err(|error| format!("无法恢复上下文中的助手消息：{error}"))?,
+        );
+    }
     let mut input = String::new();
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
@@ -73,30 +91,54 @@ fn chat_loop(
             }
             "/clear" => {
                 messages.clear();
+                archive.turns.clear();
                 context.clear_kv_cache();
                 println!("已清空对话历史。");
                 continue;
             }
+            "/save" => {
+                eprintln!(
+                    "用法：/save <名称>（名称仅可包含 ASCII 字母、数字、点、短横线和下划线）"
+                );
+                continue;
+            }
             "/help" => {
                 println!(
-                    "对话内命令：\n  /clear  清空对话历史\n  /help   显示本帮助\n  /exit   退出（或 /quit、Ctrl-D）"
+                    "对话内命令：\n  /save <名称>  保存当前对话\n  /clear        清空对话历史\n  /help         显示本帮助\n  /exit         退出（或 /quit、Ctrl-D）"
                 );
                 continue;
             }
             "" => continue,
-            _ => {}
+            _ => {
+                if let Some(name) = prompt.strip_prefix("/save ") {
+                    let name = name.trim();
+                    if name.is_empty() || name.chars().any(char::is_whitespace) {
+                        eprintln!(
+                            "用法：/save <名称>（名称仅可包含 ASCII 字母、数字、点、短横线和下划线）"
+                        );
+                        continue;
+                    }
+                    archive.name = name.to_string();
+                    match store.save(&archive) {
+                        Ok(()) => println!("已保存上下文“{name}”。"),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                    continue;
+                }
+            }
         }
 
         let user_message = LlamaChatMessage::new("user".into(), prompt.into())
             .map_err(|error| format!("无法创建用户消息：{error}"))?;
         messages.push(user_message);
-        let tokens = fit_prompt(
+        let (tokens, dropped_turns) = fit_prompt(
             model,
             options.system.as_deref(),
             &mut messages,
             options.max_tokens,
             context.n_ctx(),
         )?;
+        archive.turns.drain(..dropped_turns);
 
         println!("正在处理输入并生成回答…");
         io::stdout()
@@ -105,9 +147,13 @@ fn chat_loop(
         let generation_started = Instant::now();
         let (answer, generated) = generate(model, context, &tokens, options)?;
         messages.push(
-            LlamaChatMessage::new("assistant".into(), answer)
+            LlamaChatMessage::new("assistant".into(), answer.clone())
                 .map_err(|error| format!("无法创建助手消息：{error}"))?,
         );
+        archive.turns.push(ConversationTurn {
+            user: prompt.to_string(),
+            assistant: answer,
+        });
         let elapsed = generation_started.elapsed().as_secs_f64();
         if generated > 0 && elapsed > 0.0 {
             eprintln!(
@@ -124,9 +170,10 @@ fn fit_prompt(
     messages: &mut Vec<LlamaChatMessage>,
     max_tokens: usize,
     context_size: u32,
-) -> Result<Vec<LlamaToken>, String> {
+) -> Result<(Vec<LlamaToken>, usize), String> {
     let limit = usize::try_from(context_size)
         .map_err(|_| "模型上下文长度超出当前平台支持范围。".to_string())?;
+    let mut dropped_turns = 0;
     loop {
         let mut prompt_messages =
             Vec::with_capacity(messages.len() + usize::from(system.is_some()));
@@ -144,7 +191,7 @@ fn fit_prompt(
             .str_to_token(&prompt, AddBos::Always)
             .map_err(|error| format!("无法编码输入文本：{error}"))?;
         if tokens.len().saturating_add(max_tokens) <= limit {
-            return Ok(tokens);
+            return Ok((tokens, dropped_turns));
         }
         if messages.len() <= 1 {
             return Err(format!(
@@ -152,6 +199,7 @@ fn fit_prompt(
             ));
         }
         messages.drain(..2);
+        dropped_turns += 1;
         eprintln!("上下文接近上限：已截断较早的对话轮次。");
     }
 }

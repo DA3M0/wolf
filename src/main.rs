@@ -2,11 +2,13 @@
 
 mod chat;
 mod cli;
+mod context;
 mod inspect;
 
 use cli::RunError;
+use context::{ContextArchive, ContextCommand, ContextStore};
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -44,12 +46,16 @@ fn run(args: Vec<String>) -> Result<(), RunError> {
             Ok(())
         }
         "chat" => {
-            let (path, options) = cli::parse_chat_args(&args[1..])?;
-            run_chat(&path, options)
+            let (path, options, context_options) = cli::parse_chat_args(&args[1..])?;
+            run_chat(&path, options, context_options)
+        }
+        "context" => {
+            let (operation, options) = cli::parse_context_args(&args[1..])?;
+            run_context_command(operation, options.directory)
         }
         value if !value.starts_with('-') => {
-            let (path, options) = cli::parse_chat_args(&args)?;
-            run_chat(&path, options)
+            let (path, options, context_options) = cli::parse_chat_args(&args)?;
+            run_chat(&path, options, context_options)
         }
         other => Err(RunError::usage(format!(
             "未知命令“{other}”。运行 `wolf help` 查看用法。"
@@ -57,9 +63,44 @@ fn run(args: Vec<String>) -> Result<(), RunError> {
     }
 }
 
-fn run_chat(path: &Path, options: cli::ChatOptions) -> Result<(), RunError> {
+fn run_chat(
+    path: &Path,
+    requested_options: cli::ChatOptions,
+    context_options: cli::ContextCliOptions,
+) -> Result<(), RunError> {
+    let chat_options_specified = context_options.chat_options_specified;
+    let store = ContextStore::new(context_options.directory);
+    let archive = match context_options.name {
+        Some(name) => runtime(store.load(&name))?,
+        None => runtime(ContextArchive::new(path, requested_options.clone()))?,
+    };
+    let options = if archive.name.is_empty() {
+        requested_options
+    } else {
+        runtime(archive.validate_for_launch(path, &requested_options, chat_options_specified))?
+    };
     runtime(cli::configure_threads(options.threads))?;
-    runtime(chat::chat(path, options))
+    runtime(chat::chat(path, options, archive, store))
+}
+
+fn run_context_command(
+    operation: ContextCommand,
+    directory: Option<PathBuf>,
+) -> Result<(), RunError> {
+    let store = ContextStore::new(directory);
+    match operation {
+        ContextCommand::List => {
+            for archive in runtime(store.list())? {
+                println!("{:<24} {:>5} 轮", archive.name, archive.turns.len());
+            }
+            Ok(())
+        }
+        ContextCommand::Delete(name) => {
+            runtime(store.delete(&name))?;
+            println!("已删除上下文“{name}”。");
+            Ok(())
+        }
+    }
 }
 
 fn runtime<T>(result: Result<T, String>) -> Result<T, RunError> {
@@ -68,11 +109,8 @@ fn runtime<T>(result: Result<T, String>) -> Result<T, RunError> {
 
 fn print_formats() {
     println!("当前支持的权重格式：");
-    println!("  .gguf              llama.cpp 对话推理和模型信息检查（默认 CPU）");
-    println!("  Gemma 4 模型目录  Candle CPU 文本推理（Safetensors 权重）");
-    println!("  .safetensors       模型信息检查（其他模型暂不支持推理）");
-
-    println!("\nGemma 4 目录需包含 config.json、tokenizer.json 和 Safetensors 权重。");
+    println!("  .gguf          llama.cpp 对话推理和模型信息检查（默认 CPU）");
+    println!("  .safetensors   模型信息检查（不支持对话推理）");
 }
 
 fn print_help() {
@@ -80,10 +118,12 @@ fn print_help() {
         "wolf - Rust 本地模型加载器与对话 CLI\n\
 \n\
 用法：\n\
-  wolf <模型路径>                         加载 GGUF 或 Gemma 4 目录并进入多轮对话\n\
+  wolf <模型路径>                         加载 GGUF 模型并进入多轮对话\n\
   wolf chat <模型路径>                    同上\n\
   wolf load <模型文件> [--all] [--json]   加载并显示模型信息\n\
   wolf inspect <模型文件> [--all] [--json]（load 的别名）\n\
+  wolf context list [--context-dir <路径>]  列出已保存上下文\n\
+  wolf context delete <名称> [--context-dir <路径>]  删除上下文\n\
   wolf formats                            列出支持的格式\n\
   wolf version                            显示版本（--version / -V）\n\
   wolf help                               显示帮助\n\
@@ -97,6 +137,8 @@ fn print_help() {
   --repeat-penalty F   重复惩罚（默认 1 = 关闭）\n\
   --seed N             随机种子，用于复现同一次生成\n\
   --system \"...\"       系统提示词，仅在对话首轮注入\n\
+  --context <名称>     恢复已保存的对话上下文\n\
+  --context-dir <路径> 上下文存档目录（也可用于 /save）\n\
 \n\
 示例：\n\
   wolf ./models/llama-2-7b-chat.Q4_K_M.gguf\n\
@@ -104,13 +146,12 @@ fn print_help() {
   wolf ./models/model.gguf --temperature 0.7 --top-k 50 --seed 42\n\
   wolf ./models/model.gguf --system \"你是一个简洁的中文助手\"\n\
   wolf ./models/model.gguf --temperature 0\n\
-  wolf ./models/gemma-4-E2B-it/\n\
   wolf /data/models/llama.gguf\n\
   wolf chat \"C:\\\\models\\\\llama.gguf\"\n\
   wolf load ./model.safetensors\n\
   wolf load ./model.gguf --all\n\
   wolf inspect ./model.safetensors --json\n\
 \n\
-对话中输入 /exit 退出。GGUF 推理由 llama.cpp 提供；Gemma 4 Safetensors 目录使用 Candle CPU 推理。"
+对话中输入 /exit 退出。GGUF 推理由 llama.cpp 提供。Safetensors 仅支持文件检查。"
     );
 }

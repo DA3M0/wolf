@@ -1,5 +1,6 @@
 //! 命令行参数解析与运行期选项。
 
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -10,7 +11,7 @@ pub const DEFAULT_TEMPERATURE: f64 = 0.0;
 pub const DEFAULT_TOP_P: f64 = 0.9;
 pub const DEFAULT_REPEAT_PENALTY: f32 = 1.0;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatOptions {
     pub threads: Option<usize>,
     pub max_tokens: usize,
@@ -26,6 +27,19 @@ pub struct ChatOptions {
     pub seed: Option<u64>,
     /// 系统提示词,仅在首轮注入。
     pub system: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContextCliOptions {
+    pub name: Option<String>,
+    pub directory: Option<PathBuf>,
+    pub chat_options_specified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextCommand {
+    List,
+    Delete(String),
 }
 
 pub const DEFAULT_CHAT_OPTIONS: ChatOptions = ChatOptions {
@@ -67,45 +81,75 @@ impl std::fmt::Display for RunError {
     }
 }
 
-pub fn parse_chat_args(args: &[String]) -> Result<(PathBuf, ChatOptions), RunError> {
+pub fn parse_chat_args(
+    args: &[String],
+) -> Result<(PathBuf, ChatOptions, ContextCliOptions), RunError> {
     let mut path = None;
     let mut options = DEFAULT_CHAT_OPTIONS;
+    let mut context = ContextCliOptions::default();
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--threads" => {
                 index += 1;
                 options.threads = Some(parse_positive_option(args, index, "--threads")?);
+                context.chat_options_specified = true;
             }
             "--max-tokens" => {
                 index += 1;
                 options.max_tokens = parse_positive_option(args, index, "--max-tokens")?;
+                context.chat_options_specified = true;
             }
             "--temperature" => {
                 index += 1;
                 options.temperature = parse_float_option(args, index, "--temperature", 0.0)?;
+                context.chat_options_specified = true;
             }
             "--top-p" => {
                 index += 1;
                 options.top_p = parse_bounded_float_option(args, index, "--top-p", 0.0, 1.0)?;
+                context.chat_options_specified = true;
             }
             "--top-k" => {
                 index += 1;
                 options.top_k = parse_nonnegative_option(args, index, "--top-k")?;
+                context.chat_options_specified = true;
             }
             "--repeat-penalty" => {
                 index += 1;
                 options.repeat_penalty =
                     parse_bounded_float_option(args, index, "--repeat-penalty", 1.0, f64::MAX)?
                         as f32;
+                context.chat_options_specified = true;
             }
             "--seed" => {
                 index += 1;
                 options.seed = Some(parse_u64_option(args, index, "--seed")?);
+                context.chat_options_specified = true;
             }
             "--system" => {
                 index += 1;
                 options.system = Some(parse_text_option(args, index, "--system")?);
+                context.chat_options_specified = true;
+            }
+            "--context" => {
+                index += 1;
+                let name = parse_text_option(args, index, "--context")?;
+                if context.name.replace(name).is_some() {
+                    return Err(RunError::usage("--context 只能指定一次。"));
+                }
+            }
+            "--context-dir" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| RunError::usage("--context-dir 缺少路径。"))?;
+                if value.is_empty() {
+                    return Err(RunError::usage("--context-dir 路径不能为空。"));
+                }
+                if context.directory.replace(PathBuf::from(value)).is_some() {
+                    return Err(RunError::usage("--context-dir 只能指定一次。"));
+                }
             }
             option if option.starts_with('-') => {
                 return Err(RunError::usage(format!(
@@ -123,10 +167,63 @@ pub fn parse_chat_args(args: &[String]) -> Result<(PathBuf, ChatOptions), RunErr
 
     let path = path.ok_or_else(|| {
         RunError::usage(
-            "请指定一个 GGUF 模型文件或 Gemma 4 模型目录。用法：wolf <模型路径> [选项]，运行 `wolf help` 查看全部选项。",
+            "请指定一个 GGUF 模型文件。用法：wolf <模型路径> [选项]，运行 `wolf help` 查看全部选项。",
         )
     })?;
-    Ok((path, options))
+    Ok((path, options, context))
+}
+
+pub fn parse_context_args(
+    args: &[String],
+) -> Result<(ContextCommand, ContextCliOptions), RunError> {
+    let Some(command) = args.first().map(String::as_str) else {
+        return Err(RunError::usage(
+            "缺少上下文操作。用法：wolf context list | delete <名称> [--context-dir <路径>]",
+        ));
+    };
+    let mut context = ContextCliOptions::default();
+    let mut name = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--context-dir" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| RunError::usage("--context-dir 缺少路径。"))?;
+                if value.is_empty() {
+                    return Err(RunError::usage("--context-dir 路径不能为空。"));
+                }
+                if context.directory.replace(PathBuf::from(value)).is_some() {
+                    return Err(RunError::usage("--context-dir 只能指定一次。"));
+                }
+            }
+            value if value.starts_with('-') => {
+                return Err(RunError::usage(format!("未知选项“{value}”。")));
+            }
+            value => {
+                if name.replace(value.to_string()).is_some() {
+                    return Err(RunError::usage("上下文操作只能指定一个名称。"));
+                }
+            }
+        }
+        index += 1;
+    }
+    let operation = match command {
+        "list" if name.is_none() => ContextCommand::List,
+        "delete" => ContextCommand::Delete(name.ok_or_else(|| {
+            RunError::usage(
+                "缺少上下文名称。用法：wolf context delete <名称> [--context-dir <路径>]",
+            )
+        })?),
+        "list" => return Err(RunError::usage("wolf context list 不接受上下文名称。")),
+        other => {
+            return Err(RunError::usage(format!(
+                "未知上下文操作“{other}”。可用操作：list、delete。"
+            )));
+        }
+    };
+    Ok((operation, context))
 }
 
 pub fn parse_load_args(args: &[String]) -> Result<(PathBuf, bool, bool), RunError> {
@@ -271,8 +368,9 @@ mod tests {
     #[test]
     fn parses_chat_speed_options() {
         let values = args(&["model.gguf", "--threads", "8", "--max-tokens", "64"]);
-        let (path, options) = parse_chat_args(&values).unwrap();
+        let (path, options, context) = parse_chat_args(&values).unwrap();
         assert_eq!(path, PathBuf::from("model.gguf"));
+        assert_eq!(context, ContextCliOptions::default());
         assert_eq!(
             options,
             ChatOptions {
@@ -300,7 +398,7 @@ mod tests {
             "--system",
             "你是一个简洁的助手",
         ]);
-        let (_, options) = parse_chat_args(&values).unwrap();
+        let (_, options, _) = parse_chat_args(&values).unwrap();
         assert_eq!(options.temperature, 0.0);
         assert_eq!(options.top_p, 1.0);
         assert_eq!(options.top_k, 40);
@@ -367,5 +465,37 @@ mod tests {
     fn reports_usage_errors_with_usage_variant() {
         let error = parse_chat_args(&args(&["--bogus"])).unwrap_err();
         assert!(matches!(error, RunError::Usage(_)));
+    }
+
+    #[test]
+    fn parses_context_options_and_management_commands() {
+        let (_, _, context) = parse_chat_args(&args(&[
+            "model.gguf",
+            "--context",
+            "work",
+            "--context-dir",
+            "/tmp/wolf-contexts",
+        ]))
+        .unwrap();
+        assert_eq!(context.name.as_deref(), Some("work"));
+        assert_eq!(context.directory, Some(PathBuf::from("/tmp/wolf-contexts")));
+        assert!(!context.chat_options_specified);
+        let (_, _, context) =
+            parse_chat_args(&args(&["model.gguf", "--max-tokens", "256"])).unwrap();
+        assert!(context.chat_options_specified);
+
+        let (operation, options) = parse_context_args(&args(&[
+            "delete",
+            "work",
+            "--context-dir",
+            "/tmp/wolf-contexts",
+        ]))
+        .unwrap();
+        assert_eq!(operation, ContextCommand::Delete("work".into()));
+        assert_eq!(options.directory, Some(PathBuf::from("/tmp/wolf-contexts")));
+        assert_eq!(
+            parse_context_args(&args(&["list"])).unwrap().0,
+            ContextCommand::List
+        );
     }
 }
