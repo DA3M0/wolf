@@ -17,7 +17,7 @@ pub fn chat(
     options: ChatOptions,
     archive: ContextArchive,
     store: ContextStore,
-) -> Result<(), String> {
+) -> std::result::Result<(), String> {
     let mut backend =
         LlamaBackend::init().map_err(|error| format!("无法初始化 llama.cpp：{error}"))?;
     backend.void_logs();
@@ -49,15 +49,15 @@ fn chat_loop(
     options: &ChatOptions,
     mut archive: ContextArchive,
     store: ContextStore,
-) -> Result<(), String> {
+) -> std::result::Result<(), String> {
     let mut messages = Vec::with_capacity(archive.turns.len() * 2);
     for turn in &archive.turns {
         messages.push(
-            LlamaChatMessage::new("user".into(), turn.user.clone().into())
+            LlamaChatMessage::new("user".into(), turn.user.clone())
                 .map_err(|error| format!("无法恢复上下文中的用户消息：{error}"))?,
         );
         messages.push(
-            LlamaChatMessage::new("assistant".into(), turn.assistant.clone().into())
+            LlamaChatMessage::new("assistant".into(), turn.assistant.clone())
                 .map_err(|error| format!("无法恢复上下文中的助手消息：{error}"))?,
         );
     }
@@ -170,7 +170,7 @@ fn fit_prompt(
     messages: &mut Vec<LlamaChatMessage>,
     max_tokens: usize,
     context_size: u32,
-) -> Result<(Vec<LlamaToken>, usize), String> {
+) -> std::result::Result<(Vec<LlamaToken>, usize), String> {
     let limit = usize::try_from(context_size)
         .map_err(|_| "模型上下文长度超出当前平台支持范围。".to_string())?;
     let mut dropped_turns = 0;
@@ -209,7 +209,7 @@ fn generate(
     context: &mut LlamaContext<'_>,
     prompt: &[LlamaToken],
     options: &ChatOptions,
-) -> Result<(String, usize), String> {
+) -> std::result::Result<(String, usize), String> {
     if prompt.is_empty() {
         return Err("输入未能转换为模型 token，请重试。".into());
     }
@@ -257,7 +257,10 @@ fn generate(
             .token_to_bytes(token, Special::Tokenize)
             .map_err(|error| format!("无法解码模型回答：{error}"))?;
         let mut text = String::with_capacity(bytes.len().saturating_mul(3).max(32));
-        decoder.decode_to_string(&bytes, &mut text, false);
+        let (decode_result, _, _) = decoder.decode_to_string(&bytes, &mut text, false);
+        if matches!(decode_result, encoding_rs::CoderResult::OutputFull) {
+            return Err("模型回答的 UTF-8 解码缓冲区不足。".to_string());
+        }
         answer.push_str(&text);
         output
             .write_all(text.as_bytes())
@@ -283,7 +286,10 @@ fn generate(
     }
 
     let mut final_text = String::new();
-    decoder.decode_to_string(&[], &mut final_text, true);
+    let (decode_result, _, _) = decoder.decode_to_string(&[], &mut final_text, true);
+    if matches!(decode_result, encoding_rs::CoderResult::OutputFull) {
+        return Err("模型回答的 UTF-8 解码缓冲区不足。".to_string());
+    }
     answer.push_str(&final_text);
     output
         .write_all(final_text.as_bytes())
@@ -293,7 +299,10 @@ fn generate(
     Ok((answer, generated))
 }
 
-fn make_sampler(model: &LlamaModel, options: &ChatOptions) -> Result<LlamaSampler, String> {
+fn make_sampler(
+    model: &LlamaModel,
+    options: &ChatOptions,
+) -> std::result::Result<LlamaSampler, String> {
     if options.temperature < 1e-7 {
         let mut samplers = Vec::new();
         if options.repeat_penalty > 1.0 {

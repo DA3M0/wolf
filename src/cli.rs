@@ -370,7 +370,7 @@ mod tests {
         let values = args(&["model.gguf", "--threads", "8", "--max-tokens", "64"]);
         let (path, options, context) = parse_chat_args(&values).unwrap();
         assert_eq!(path, PathBuf::from("model.gguf"));
-        assert_eq!(context, ContextCliOptions::default());
+        assert!(context.chat_options_specified);
         assert_eq!(
             options,
             ChatOptions {

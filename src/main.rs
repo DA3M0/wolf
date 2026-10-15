@@ -5,8 +5,9 @@ mod cli;
 mod context;
 mod inspect;
 
+use cli::ContextCommand;
 use cli::RunError;
-use context::{ContextArchive, ContextCommand, ContextStore};
+use context::{ContextArchive, ContextStore};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
