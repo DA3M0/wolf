@@ -11,6 +11,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 const BATCH_SIZE: usize = 512;
+const CHATML_END_MARKER: &str = "<|im_end|>";
 
 pub fn chat(
     path: &Path,
@@ -50,6 +51,7 @@ fn chat_loop(
     mut archive: ContextArchive,
     store: ContextStore,
 ) -> std::result::Result<(), String> {
+    let stop_markers = detect_stop_markers(model)?;
     let mut messages = Vec::with_capacity(archive.turns.len() * 2);
     for turn in &archive.turns {
         messages.push(
@@ -145,7 +147,7 @@ fn chat_loop(
             .flush()
             .map_err(|error| format!("无法刷新输出：{error}"))?;
         let generation_started = Instant::now();
-        let (answer, generated) = generate(model, context, &tokens, options)?;
+        let (answer, generated) = generate(model, context, &tokens, options, &stop_markers)?;
         messages.push(
             LlamaChatMessage::new("assistant".into(), answer.clone())
                 .map_err(|error| format!("无法创建助手消息：{error}"))?,
@@ -204,11 +206,51 @@ fn fit_prompt(
     }
 }
 
+fn detect_stop_markers(model: &LlamaModel) -> std::result::Result<Vec<String>, String> {
+    const PROBE: &str = "wolf_template_stop_probe_7f3a";
+
+    let messages = [
+        LlamaChatMessage::new("user".into(), "probe".into())
+            .map_err(|error| format!("无法创建模板检测用户消息：{error}"))?,
+        LlamaChatMessage::new("assistant".into(), PROBE.into())
+            .map_err(|error| format!("无法创建模板检测助手消息：{error}"))?,
+    ];
+    let rendered = model
+        .apply_chat_template(None, &messages, false)
+        .map_err(|error| format!("无法从 GGUF 对话模板检测结束标记：{error}"))?;
+
+    let mut markers = template_ending(&rendered, PROBE)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let end_of_turn = model.token_eot();
+    if end_of_turn.0 >= 0 {
+        let bytes = model
+            .token_to_bytes(end_of_turn, Special::Tokenize)
+            .map_err(|error| format!("无法读取模型回合结束标记：{error}"))?;
+        let marker = String::from_utf8(bytes)
+            .map_err(|error| format!("模型回合结束标记不是有效 UTF-8：{error}"))?;
+        if !marker.is_empty() {
+            markers.push(marker);
+        }
+    }
+    markers.push(CHATML_END_MARKER.to_string());
+    markers.sort();
+    markers.dedup();
+    Ok(markers)
+}
+
+fn template_ending(rendered: &str, probe: &str) -> Option<String> {
+    let probe_end = rendered.rfind(probe)?.checked_add(probe.len())?;
+    let ending = rendered[probe_end..].trim();
+    (!ending.is_empty()).then(|| ending.to_string())
+}
+
 fn generate(
     model: &LlamaModel,
     context: &mut LlamaContext<'_>,
     prompt: &[LlamaToken],
     options: &ChatOptions,
+    stop_markers: &[String],
 ) -> std::result::Result<(String, usize), String> {
     if prompt.is_empty() {
         return Err("输入未能转换为模型 token，请重试。".into());
@@ -235,6 +277,7 @@ fn generate(
     for token in prompt.iter().copied() {
         sampler.accept(token);
     }
+    let mut stop_sequence = StopSequence::new(stop_markers.to_vec());
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     let mut answer = String::new();
     let mut output = io::stdout().lock();
@@ -248,10 +291,10 @@ fn generate(
             break;
         }
         let token = sampler.sample(context, batch.n_tokens() - 1);
-        sampler.accept(token);
-        if model.is_eog_token(token) {
+        if is_stop_token(token, model.token_eot(), model.is_eog_token(token)) {
             break;
         }
+        sampler.accept(token);
 
         let bytes = model
             .token_to_bytes(token, Special::Tokenize)
@@ -261,6 +304,7 @@ fn generate(
         if matches!(decode_result, encoding_rs::CoderResult::OutputFull) {
             return Err("模型回答的 UTF-8 解码缓冲区不足。".to_string());
         }
+        let (text, stopped) = stop_sequence.push(&text);
         answer.push_str(&text);
         output
             .write_all(text.as_bytes())
@@ -269,6 +313,9 @@ fn generate(
             .flush()
             .map_err(|error| format!("无法刷新模型回答：{error}"))?;
         generated += 1;
+        if stopped {
+            break;
+        }
 
         batch.clear();
         batch
@@ -290,13 +337,82 @@ fn generate(
     if matches!(decode_result, encoding_rs::CoderResult::OutputFull) {
         return Err("模型回答的 UTF-8 解码缓冲区不足。".to_string());
     }
+    let (final_text, _) = stop_sequence.push(&final_text);
     answer.push_str(&final_text);
     output
         .write_all(final_text.as_bytes())
+        .and_then(|()| {
+            let remaining = stop_sequence.finish();
+            answer.push_str(&remaining);
+            output.write_all(remaining.as_bytes())
+        })
         .and_then(|()| writeln!(output))
         .and_then(|()| output.flush())
         .map_err(|error| format!("无法结束模型回答：{error}"))?;
     Ok((answer, generated))
+}
+
+fn is_stop_token(token: LlamaToken, end_of_turn: LlamaToken, is_eog: bool) -> bool {
+    is_eog || token == end_of_turn
+}
+
+struct StopSequence {
+    markers: Vec<String>,
+    pending: String,
+}
+
+impl StopSequence {
+    fn new(markers: Vec<String>) -> Self {
+        Self {
+            markers: markers
+                .into_iter()
+                .filter(|marker| !marker.is_empty())
+                .collect(),
+            pending: String::new(),
+        }
+    }
+
+    fn push(&mut self, text: &str) -> (String, bool) {
+        if self.markers.is_empty() {
+            return (text.to_owned(), false);
+        }
+        self.pending.push_str(text);
+        let stop = self
+            .markers
+            .iter()
+            .filter_map(|marker| self.pending.find(marker).map(|index| (index, marker.len())))
+            .min_by_key(|(index, length)| (*index, *length));
+        if let Some((index, _)) = stop {
+            let visible = self.pending[..index].to_owned();
+            self.pending.clear();
+            return (visible, true);
+        }
+
+        let mut held_len = 0;
+        for marker in &self.markers {
+            let max_prefix_len = self.pending.len().min(marker.len() - 1);
+            for length in (1..=max_prefix_len).rev() {
+                if marker
+                    .get(..length)
+                    .is_some_and(|prefix| self.pending.ends_with(prefix))
+                {
+                    held_len = held_len.max(length);
+                    break;
+                }
+            }
+        }
+        let mut visible_end = self.pending.len() - held_len;
+        while !self.pending.is_char_boundary(visible_end) {
+            visible_end -= 1;
+        }
+        let visible = self.pending[..visible_end].to_owned();
+        self.pending.drain(..visible_end);
+        (visible, false)
+    }
+
+    fn finish(&mut self) -> String {
+        std::mem::take(&mut self.pending)
+    }
 }
 
 fn make_sampler(
@@ -343,4 +459,80 @@ fn random_seed() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos() as u64)
         .unwrap_or(0x5EED_1234_ABCD_EF01)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stops_on_model_end_of_turn_token_even_when_not_marked_eog() {
+        let end_of_turn = LlamaToken::new(42);
+        assert!(is_stop_token(end_of_turn, end_of_turn, false));
+    }
+
+    #[test]
+    fn preserves_generic_end_of_generation_stopping() {
+        let end_of_turn = LlamaToken::new(42);
+        let eog = LlamaToken::new(43);
+        assert!(is_stop_token(eog, end_of_turn, true));
+    }
+
+    #[test]
+    fn does_not_stop_on_ordinary_tokens() {
+        let end_of_turn = LlamaToken::new(42);
+        let ordinary = LlamaToken::new(44);
+        assert!(!is_stop_token(ordinary, end_of_turn, false));
+    }
+
+    #[test]
+    fn stops_when_model_end_marker_is_spelled_across_tokens() {
+        let mut matcher = StopSequence::new(vec!["<|eot_id|>".into(), CHATML_END_MARKER.into()]);
+        let (first, stopped) = matcher.push("Answer <|im_");
+        assert_eq!(first, "Answer ");
+        assert!(!stopped);
+
+        let (second, stopped) = matcher.push("end|>user");
+        assert_eq!(second, "");
+        assert!(stopped);
+        assert_eq!(matcher.finish(), "");
+    }
+
+    #[test]
+    fn flushes_partial_marker_prefix_when_generation_finishes() {
+        let mut matcher = StopSequence::new(vec![CHATML_END_MARKER.into()]);
+        let (visible, stopped) = matcher.push("Answer <|im_");
+        assert_eq!(visible, "Answer ");
+        assert!(!stopped);
+        assert_eq!(matcher.finish(), "<|im_");
+    }
+
+    #[test]
+    fn preserves_utf8_text_before_a_partial_stop_marker() {
+        let mut matcher = StopSequence::new(vec![CHATML_END_MARKER.into()]);
+        let (visible, stopped) = matcher.push("你好!<");
+        assert_eq!(visible, "你好!");
+        assert!(!stopped);
+        assert_eq!(matcher.finish(), "<");
+    }
+
+    #[test]
+    fn extracts_non_llama_turn_ending_from_rendered_template() {
+        let rendered = "<|user|>probe<|assistant|>wolf_template_stop_probe_7f3a<|end_of_turn|>\n";
+        assert_eq!(
+            template_ending(rendered, "wolf_template_stop_probe_7f3a").as_deref(),
+            Some("<|end_of_turn|>")
+        );
+    }
+
+    #[test]
+    fn returns_no_template_stop_when_rendered_turn_has_no_suffix() {
+        assert_eq!(
+            template_ending(
+                "assistant: wolf_template_stop_probe_7f3a",
+                "wolf_template_stop_probe_7f3a"
+            ),
+            None
+        );
+    }
 }

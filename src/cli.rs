@@ -1,8 +1,8 @@
 //! Command-line argument parsing and runtime options.
 
+use crate::options::{ChatOptions, DEFAULT_CHAT_OPTIONS};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use wolf_CLI::options::{ChatOptions, DEFAULT_CHAT_OPTIONS};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextCliOptions {
@@ -314,7 +314,7 @@ fn parse_float_raw(args: &[String], index: usize, option: &str) -> Result<f64, R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wolf_CLI::options::DEFAULT_CHAT_OPTIONS;
+    use crate::options::DEFAULT_CHAT_OPTIONS;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
