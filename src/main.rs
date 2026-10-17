@@ -1,16 +1,12 @@
-//! wolf - Rust 本地模型加载器与对话 CLI。
+//! `wolf` command-line interface.
 
-mod chat;
 mod cli;
-mod context;
-mod inspect;
 
-use cli::ContextCommand;
-use cli::RunError;
-use context::{ContextArchive, ContextStore};
+use cli::{ContextCommand, RunError};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use wolf::{ChatOptions, ContextArchive, ContextStore, ModelInfo};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -43,7 +39,12 @@ fn run(args: Vec<String>) -> Result<(), RunError> {
         }
         "load" | "inspect" => {
             let (path, json, show_all) = cli::parse_load_args(&args[1..])?;
-            runtime(inspect::inspect_model(&path, json, show_all))?;
+            let info = runtime(wolf::inspect_model(&path))?;
+            if json {
+                print_json(&info)?;
+            } else {
+                print_model(&info, show_all);
+            }
             Ok(())
         }
         "chat" => {
@@ -66,7 +67,7 @@ fn run(args: Vec<String>) -> Result<(), RunError> {
 
 fn run_chat(
     path: &Path,
-    requested_options: cli::ChatOptions,
+    requested_options: ChatOptions,
     context_options: cli::ContextCliOptions,
 ) -> Result<(), RunError> {
     let chat_options_specified = context_options.chat_options_specified;
@@ -80,8 +81,7 @@ fn run_chat(
     } else {
         runtime(archive.validate_for_launch(path, &requested_options, chat_options_specified))?
     };
-    runtime(cli::configure_threads(options.threads))?;
-    runtime(chat::chat(path, options, archive, store))
+    runtime(wolf::chat::chat(path, options, archive, store))
 }
 
 fn run_context_command(
@@ -156,3 +156,81 @@ fn print_help() {
 对话中输入 /exit 退出。GGUF 推理由 llama.cpp 提供。Safetensors 仅支持文件检查。"
     );
 }
+
+fn print_model(info: &ModelInfo, show_all: bool) {
+    println!("模型：{}", info.path.display());
+    println!("格式：{}", info.format);
+    println!("文件大小：{}", format_size(info.file_size));
+    println!("张量数量：{}", info.tensors.len());
+    println!("状态：已映射文件并验证头部");
+
+    if !info.metadata.is_empty() {
+        println!("\n元数据：");
+        for (key, value) in &info.metadata {
+            println!("  {key}: {value}");
+        }
+    }
+    if !info.tensors.is_empty() {
+        println!("\n张量：");
+        let count = if show_all {
+            info.tensors.len()
+        } else {
+            info.tensors.len().min(DEFAULT_TENSOR_LIMIT)
+        };
+        for tensor in info.tensors.iter().take(count) {
+            let bytes = tensor
+                .bytes
+                .map(|size| format!("  {}", format_size(size)))
+                .unwrap_or_default();
+            println!(
+                "  {}  {:?}  {}{}",
+                tensor.name, tensor.shape, tensor.dtype, bytes
+            );
+        }
+        if count < info.tensors.len() {
+            println!(
+                "  …另有 {} 个张量未显示（使用 --all 查看）",
+                info.tensors.len() - count
+            );
+        }
+    }
+}
+
+fn print_json(info: &ModelInfo) -> Result<(), RunError> {
+    let output = serde_json::json!({
+        "path": info.path,
+        "format": info.format,
+        "file_size": info.file_size,
+        "tensor_count": info.tensors.len(),
+        "metadata": info.metadata,
+        "tensors": info.tensors.iter().map(|tensor| serde_json::json!({
+            "name": tensor.name,
+            "shape": tensor.shape,
+            "dtype": tensor.dtype,
+            "bytes": tensor.bytes,
+        })).collect::<Vec<_>>(),
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output)
+            .map_err(|error| RunError::Runtime(format!("无法生成 JSON 输出：{error}")))?
+    );
+    Ok(())
+}
+
+fn format_size(size: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = size as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{size} {}", UNITS[unit])
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+const DEFAULT_TENSOR_LIMIT: usize = 20;

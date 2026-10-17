@@ -1,7 +1,7 @@
 //! GGUF chat powered by llama.cpp through llama-cpp-4.
 
-use crate::cli::{ChatOptions, DEFAULT_CONTEXT_TOKENS};
 use crate::context::{ContextArchive, ContextStore, ConversationTurn};
+use crate::options::{ChatOptions, DEFAULT_CONTEXT_TOKENS};
 use llama_cpp_4::prelude::*;
 use std::io::{self, BufRead, Write};
 use std::num::NonZeroU32;

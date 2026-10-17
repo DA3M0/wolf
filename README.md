@@ -45,6 +45,44 @@ cargo build --release --features metal  # Apple Metal（macOS）
 wolf version        # 或 wolf --version / -V
 ```
 
+### 作为 Rust 库使用
+
+`wolf` 同时提供可复用的 library crate。模型检查 API 返回结构化数据，不会向终端打印；上下文存档 API 也可独立用于应用程序：
+
+```rust
+use std::path::Path;
+use wolf::{ChatOptions, ContextStore, ModelInfo, inspect_model};
+
+fn inspect(path: &Path) -> Result<ModelInfo, String> {
+    let info = inspect_model(path)?;
+    println!("{}: {} 个张量", info.format, info.tensors.len());
+    Ok(info)
+}
+
+fn main() -> Result<(), String> {
+    let info = inspect(Path::new("./models/model.gguf"))?;
+    let store = ContextStore::new(None);
+    let saved_contexts = store.list()?;
+    println!("{} 个已保存上下文", saved_contexts.len());
+    Ok(())
+}
+```
+
+聊天 API 可通过 `wolf::chat::chat` 启动交互式对话；使用 `ChatOptions`、`ContextArchive` 和 `ContextStore` 配置模型与上下文。默认选项可通过 `ChatOptions::default()` 获取：
+
+```rust
+use std::path::Path;
+use wolf::{ChatOptions, ContextArchive, ContextStore};
+
+fn main() -> Result<(), String> {
+    let path = Path::new("./models/model.gguf");
+    let options = ChatOptions::default();
+    let archive = ContextArchive::new(path, options.clone())?;
+    wolf::chat::chat(path, options, archive, ContextStore::new(None))?;
+    Ok(())
+}
+```
+
 ### 2. 加载模型并聊天
 
 路径可以是相对路径或绝对路径。路径中有空格时用引号括起来：

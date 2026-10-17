@@ -1,45 +1,66 @@
-//! 模型文件检查：GGUF 与 Safetensors 的解析、校验和展示。
+//! Model file parsing and validation for GGUF and Safetensors.
 
 use memmap2::MmapOptions;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_HEADER_SIZE: usize = 100 * 1024 * 1024;
-const DEFAULT_TENSOR_LIMIT: usize = 20;
 
-#[derive(Debug)]
-struct TensorInfo {
-    name: String,
-    shape: Vec<u64>,
-    dtype: String,
-    bytes: Option<u64>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TensorInfo {
+    /// Tensor name from the model file.
+    pub name: String,
+    /// Tensor dimensions.
+    pub shape: Vec<u64>,
+    /// Tensor data type name.
+    pub dtype: String,
+    /// Estimated or declared tensor data size in bytes, when known.
+    pub bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// Path passed to [`inspect_model`].
+    pub path: PathBuf,
+    /// Total model file size in bytes.
+    pub file_size: u64,
+    /// Detected format (`GGUF` or `Safetensors`).
+    pub format: String,
+    /// Parsed model tensors.
+    pub tensors: Vec<TensorInfo>,
+    /// Parsed model metadata.
+    pub metadata: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
-struct ModelInfo {
+struct ParsedModel {
     format: &'static str,
     tensors: Vec<TensorInfo>,
     metadata: Vec<(String, String)>,
 }
 
-pub fn inspect_model(path: &Path, json: bool, show_all: bool) -> Result<(), String> {
+/// Validate a GGUF or Safetensors model file and return its parsed metadata.
+pub fn inspect_model(path: &Path) -> Result<ModelInfo, String> {
     let file = File::open(path).map_err(|error| format!("无法打开 {}：{error}", path.display()))?;
     let mmap = unsafe {
         MmapOptions::new()
             .map(&file)
             .map_err(|error| format!("无法映射 {}：{error}", path.display()))?
     };
-    let info = parse_model(&mmap)?;
-    if json {
-        print_json(path, mmap.len(), &info)?;
-    } else {
-        print_model(path, mmap.len(), &info, show_all);
-    }
-    Ok(())
+    let parsed = parse_model(&mmap)?;
+    Ok(ModelInfo {
+        path: path.to_path_buf(),
+        file_size: u64::try_from(mmap.len())
+            .map_err(|_| "模型文件大小超出当前平台支持范围。".to_string())?,
+        format: parsed.format.to_string(),
+        tensors: parsed.tensors,
+        metadata: parsed.metadata,
+    })
 }
 
-fn parse_model(data: &[u8]) -> Result<ModelInfo, String> {
+fn parse_model(data: &[u8]) -> Result<ParsedModel, String> {
     if data.starts_with(b"GGUF") {
         parse_gguf(data)
     } else if data.len() >= 8 {
@@ -54,7 +75,7 @@ fn parse_model(data: &[u8]) -> Result<ModelInfo, String> {
     }
 }
 
-fn parse_safetensors(data: &[u8]) -> Result<ModelInfo, String> {
+fn parse_safetensors(data: &[u8]) -> Result<ParsedModel, String> {
     if data.len() < 8 {
         return Err("Safetensors 文件缺少头部长度。".into());
     }
@@ -146,14 +167,14 @@ fn parse_safetensors(data: &[u8]) -> Result<ModelInfo, String> {
             ));
         }
     }
-    Ok(ModelInfo {
+    Ok(ParsedModel {
         format: "Safetensors",
         tensors,
         metadata,
     })
 }
 
-fn parse_gguf(data: &[u8]) -> Result<ModelInfo, String> {
+fn parse_gguf(data: &[u8]) -> Result<ParsedModel, String> {
     let mut reader = Reader::new(data);
     if reader.take(4)? != b"GGUF" {
         return Err("GGUF 文件签名无效。".into());
@@ -246,7 +267,7 @@ fn parse_gguf(data: &[u8]) -> Result<ModelInfo, String> {
             ));
         }
     }
-    Ok(ModelInfo {
+    Ok(ParsedModel {
         format: "GGUF",
         tensors,
         metadata,
@@ -422,82 +443,6 @@ impl<'a> Reader<'a> {
             _ => return Err(format!("GGUF 元数据包含未知类型 {value_type}。")),
         };
         Ok(value)
-    }
-}
-
-fn print_model(path: &Path, file_size: usize, info: &ModelInfo, show_all: bool) {
-    println!("模型：{}", path.display());
-    println!("格式：{}", info.format);
-    println!("文件大小：{}", format_size(file_size as u64));
-    println!("张量数量：{}", info.tensors.len());
-    println!("状态：已映射文件并验证头部");
-
-    if !info.metadata.is_empty() {
-        println!("\n元数据：");
-        for (key, value) in &info.metadata {
-            println!("  {key}: {value}");
-        }
-    }
-    if !info.tensors.is_empty() {
-        println!("\n张量：");
-        let count = if show_all {
-            info.tensors.len()
-        } else {
-            info.tensors.len().min(DEFAULT_TENSOR_LIMIT)
-        };
-        for tensor in info.tensors.iter().take(count) {
-            let bytes = tensor
-                .bytes
-                .map(|size| format!("  {}", format_size(size)))
-                .unwrap_or_default();
-            println!(
-                "  {}  {:?}  {}{}",
-                tensor.name, tensor.shape, tensor.dtype, bytes
-            );
-        }
-        if count < info.tensors.len() {
-            println!(
-                "  …另有 {} 个张量未显示（使用 --all 查看）",
-                info.tensors.len() - count
-            );
-        }
-    }
-}
-
-fn print_json(path: &Path, file_size: usize, info: &ModelInfo) -> Result<(), String> {
-    let output = serde_json::json!({
-        "path": path,
-        "format": info.format,
-        "file_size": file_size,
-        "tensor_count": info.tensors.len(),
-        "metadata": info.metadata,
-        "tensors": info.tensors.iter().map(|tensor| serde_json::json!({
-            "name": tensor.name,
-            "shape": tensor.shape,
-            "dtype": tensor.dtype,
-            "bytes": tensor.bytes,
-        })).collect::<Vec<_>>(),
-    });
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&output)
-            .map_err(|error| format!("无法生成 JSON 输出：{error}"))?
-    );
-    Ok(())
-}
-
-pub(crate) fn format_size(size: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = size as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{size} {}", UNITS[unit])
-    } else {
-        format!("{value:.2} {}", UNITS[unit])
     }
 }
 

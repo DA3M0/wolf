@@ -1,6 +1,6 @@
 //! Named, portable chat context archives.
 
-use crate::cli::ChatOptions;
+use crate::options::ChatOptions;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -321,7 +321,7 @@ fn unix_timestamp() -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::DEFAULT_CHAT_OPTIONS;
+    use crate::options::DEFAULT_CHAT_OPTIONS;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
