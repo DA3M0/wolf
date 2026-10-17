@@ -6,7 +6,7 @@ use cli::{ContextCommand, RunError};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use wolf::{ChatOptions, ContextArchive, ContextStore, ModelInfo};
+use wolf_CLI::{ChatOptions, ContextArchive, ContextStore, ModelInfo};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -39,7 +39,7 @@ fn run(args: Vec<String>) -> Result<(), RunError> {
         }
         "load" | "inspect" => {
             let (path, json, show_all) = cli::parse_load_args(&args[1..])?;
-            let info = runtime(wolf::inspect_model(&path))?;
+            let info = runtime(wolf_CLI::inspect_model(&path))?;
             if json {
                 print_json(&info)?;
             } else {
@@ -81,7 +81,7 @@ fn run_chat(
     } else {
         runtime(archive.validate_for_launch(path, &requested_options, chat_options_specified))?
     };
-    runtime(wolf::chat::chat(path, options, archive, store))
+    runtime(wolf_CLI::chat::chat(path, options, archive, store))
 }
 
 fn run_context_command(

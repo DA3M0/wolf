@@ -1,6 +1,6 @@
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
-use wolf::inspect_model;
+use wolf_CLI::inspect_model;
 
 static FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
