@@ -1,4 +1,8 @@
 //! GGUF chat powered by llama.cpp through llama-cpp-4.
+//!
+//! The reusable inference core ([`Engine`]) is shared by the interactive CLI
+//! loop and the `wolf serve` HTTP API: the loop owns stdin/stdout, the engine
+//! owns the model and hands generated text to a [`TextSink`].
 
 use crate::context::{ContextArchive, ContextStore, ConversationTurn};
 use crate::options::{ChatOptions, DEFAULT_CONTEXT_TOKENS};
@@ -13,55 +17,337 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 const BATCH_SIZE: usize = 512;
 const CHATML_END_MARKER: &str = "<|im_end|>";
 
+/// 一条对话消息(角色 + 文本内容)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+impl ChatMessage {
+    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+
+    fn to_llama(&self) -> std::result::Result<LlamaChatMessage, String> {
+        LlamaChatMessage::new(self.role.clone(), self.content.clone())
+            .map_err(|error| format!("无法创建“{}”消息：{error}", self.role))
+    }
+}
+
+/// 生成过程中可见文本的输出目标。
+pub trait TextSink {
+    /// 输出一段可见文本;返回 `Err` 表示应中止本轮生成(例如客户端已断开)。
+    fn push(&mut self, text: &str) -> std::result::Result<(), String>;
+    /// 本轮生成结束时的收尾(CLI 补换行,服务端补收尾分片)。
+    fn finish(&mut self) -> std::result::Result<(), String> {
+        Ok(())
+    }
+    /// 是否应中断本轮生成(CLI 的 Ctrl-C);服务端由 [`TextSink::push`] 报错表示断开。
+    fn interrupted(&mut self) -> bool {
+        false
+    }
+}
+
+/// 本轮生成结束的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinishReason {
+    Stop,
+    Length,
+}
+
+impl FinishReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Length => "length",
+        }
+    }
+}
+
+/// 一次完整生成的结果。
+#[derive(Debug, Clone)]
+pub struct Generation {
+    /// 生成的可见文本(不含被拦截的结束标记)。
+    pub text: String,
+    pub prompt_tokens: usize,
+    pub generated_tokens: usize,
+    pub finish_reason: FinishReason,
+}
+
+/// 已加载的 GGUF 模型及其推理配置。
+///
+/// `LlamaModel` 是 `Send + Sync`,因此 `Engine` 可放进 `Arc` 供多个工作线程
+/// 共享;但 `LlamaContext` 不是 `Send`,必须由各线程自行创建并独占使用。
+pub struct Engine {
+    /// 字段顺序即析构顺序:模型必须先于 backend 释放。
+    model: LlamaModel,
+    backend: LlamaBackend,
+    stop_markers: Vec<String>,
+    context_size: u32,
+    threads: Option<usize>,
+}
+
+impl Engine {
+    /// 初始化 llama.cpp、加载模型,并从对话模板探测结束标记。
+    pub fn load(path: &Path, threads: Option<usize>) -> std::result::Result<Self, String> {
+        let mut backend =
+            LlamaBackend::init().map_err(|error| format!("无法初始化 llama.cpp：{error}"))?;
+        backend.void_logs();
+        let model = LlamaModel::load_from_file(&backend, path, &LlamaModelParams::default())
+            .map_err(|error| format!("无法加载 GGUF 模型：{error}"))?;
+        let default_context_size = u32::try_from(DEFAULT_CONTEXT_TOKENS)
+            .map_err(|_| "上下文长度超出 llama.cpp 支持范围。".to_string())?;
+        let context_size = default_context_size.min(model.n_ctx_train()).max(1);
+        let stop_markers = detect_stop_markers(&model)?;
+        Ok(Self {
+            model,
+            backend,
+            stop_markers,
+            context_size,
+            threads,
+        })
+    }
+
+    /// 为一次推理创建独立的 llama.cpp 上下文。
+    pub fn new_context(&self) -> std::result::Result<LlamaContext<'_>, String> {
+        let mut context_params =
+            LlamaContextParams::default().with_n_ctx(NonZeroU32::new(self.context_size));
+        if let Some(threads) = self.threads {
+            let threads = i32::try_from(threads)
+                .map_err(|_| "--threads 超出 llama.cpp 支持范围。".to_string())?;
+            context_params = context_params.with_n_threads(threads);
+        }
+        self.model
+            .new_context(&self.backend, context_params)
+            .map_err(|error| format!("无法创建 llama.cpp 推理上下文：{error}"))
+    }
+
+    /// 应用对话模板并编码。超出上下文上限时截断最早的完整轮次。
+    ///
+    /// 返回编码后的 token 与被截断的轮次数量(`messages` 已就地同步截断)。
+    pub fn prepare(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        system: Option<&str>,
+        max_tokens: usize,
+    ) -> std::result::Result<(Vec<LlamaToken>, usize), String> {
+        let limit = usize::try_from(self.context_size)
+            .map_err(|_| "模型上下文长度超出当前平台支持范围。".to_string())?;
+        let mut dropped_turns = 0;
+        loop {
+            let mut prompt_messages =
+                Vec::with_capacity(messages.len() + usize::from(system.is_some()));
+            if let Some(system) = system {
+                prompt_messages.push(
+                    LlamaChatMessage::new("system".into(), system.into())
+                        .map_err(|error| format!("无法创建系统消息：{error}"))?,
+                );
+            }
+            for message in messages.iter() {
+                prompt_messages.push(message.to_llama()?);
+            }
+            let prompt = self
+                .model
+                .apply_chat_template(None, &prompt_messages, true)
+                .map_err(|error| format!("无法应用 GGUF 对话模板：{error}"))?;
+            let tokens = self
+                .model
+                .str_to_token(&prompt, AddBos::Always)
+                .map_err(|error| format!("无法编码输入文本：{error}"))?;
+            if tokens.len().saturating_add(max_tokens) <= limit {
+                return Ok((tokens, dropped_turns));
+            }
+            if messages.len() <= 1 {
+                return Err(format!(
+                    "单轮输入加生成预留超过模型上下文上限 {limit} tokens，请缩短输入或减少 --max-tokens。"
+                ));
+            }
+            messages.drain(..2);
+            dropped_turns += 1;
+            eprintln!("上下文接近上限：已截断较早的对话轮次。");
+        }
+    }
+
+    /// 执行一次生成,把可见文本交给 `sink`。
+    pub fn generate(
+        &self,
+        context: &mut LlamaContext<'_>,
+        prompt: &[LlamaToken],
+        options: &ChatOptions,
+        extra_stop: &[String],
+        sink: &mut dyn TextSink,
+    ) -> std::result::Result<Generation, String> {
+        if prompt.is_empty() {
+            return Err("输入未能转换为模型 token，请重试。".into());
+        }
+        let mut batch = LlamaBatch::new(BATCH_SIZE, 1);
+        context.clear_kv_cache();
+        for (chunk_index, chunk) in prompt.chunks(BATCH_SIZE).enumerate() {
+            batch.clear();
+            let chunk_start = chunk_index.saturating_mul(BATCH_SIZE);
+            let last_position = i32::try_from(chunk_start + chunk.len() - 1)
+                .map_err(|_| "输入 token 数超出 llama.cpp 支持范围。".to_string())?;
+            for (offset, token) in chunk.iter().copied().enumerate() {
+                let position = i32::try_from(chunk_start + offset)
+                    .map_err(|_| "输入 token 数超出 llama.cpp 支持范围。".to_string())?;
+                batch
+                    .add(token, position, &[0], position == last_position)
+                    .map_err(|error| format!("无法准备输入批次：{error}"))?;
+            }
+            context
+                .decode(&mut batch)
+                .map_err(|error| format!("模型推理失败：{error}"))?;
+        }
+        let mut sampler = make_sampler(&self.model, options)?;
+        for token in prompt.iter().copied() {
+            sampler.accept(token);
+        }
+        let mut stop_markers = self.stop_markers.clone();
+        stop_markers.extend(extra_stop.iter().cloned());
+        stop_markers.retain(|marker| !marker.is_empty());
+        stop_markers.sort();
+        stop_markers.dedup();
+        let mut stop_sequence = StopSequence::new(stop_markers);
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        let mut answer = String::new();
+        let mut finish_reason = FinishReason::Length;
+        let mut position = i32::try_from(prompt.len())
+            .map_err(|_| "输入 token 数超出 llama.cpp 支持范围。".to_string())?;
+        let mut generated = 0usize;
+
+        for _ in 0..options.max_tokens {
+            if sink.interrupted() {
+                eprintln!("\n[已中断本轮生成]");
+                finish_reason = FinishReason::Stop;
+                break;
+            }
+            let token = sampler.sample(context, batch.n_tokens() - 1);
+            if is_stop_token(
+                token,
+                self.model.token_eot(),
+                self.model.is_eog_token(token),
+            ) {
+                finish_reason = FinishReason::Stop;
+                break;
+            }
+            sampler.accept(token);
+
+            let bytes = self
+                .model
+                .token_to_bytes(token, Special::Tokenize)
+                .map_err(|error| format!("无法解码模型回答：{error}"))?;
+            let mut text = String::with_capacity(bytes.len().saturating_mul(3).max(32));
+            let (decode_result, _, _) = decoder.decode_to_string(&bytes, &mut text, false);
+            if matches!(decode_result, encoding_rs::CoderResult::OutputFull) {
+                return Err("模型回答的 UTF-8 解码缓冲区不足。".to_string());
+            }
+            let (text, stopped) = stop_sequence.push(&text);
+            answer.push_str(&text);
+            sink.push(&text)?;
+            generated += 1;
+            if stopped {
+                finish_reason = FinishReason::Stop;
+                break;
+            }
+
+            batch.clear();
+            batch
+                .add(token, position, &[0], true)
+                .map_err(|error| format!("无法准备生成批次：{error}"))?;
+            context
+                .decode(&mut batch)
+                .map_err(|error| format!("模型推理失败：{error}"))?;
+            position = position
+                .checked_add(1)
+                .ok_or_else(|| "模型上下文位置溢出。".to_string())?;
+            if u32::try_from(position).unwrap_or(u32::MAX) >= context.n_ctx() {
+                break;
+            }
+        }
+
+        let mut final_text = String::new();
+        let (decode_result, _, _) = decoder.decode_to_string(&[], &mut final_text, true);
+        if matches!(decode_result, encoding_rs::CoderResult::OutputFull) {
+            return Err("模型回答的 UTF-8 解码缓冲区不足。".to_string());
+        }
+        let (final_text, _) = stop_sequence.push(&final_text);
+        answer.push_str(&final_text);
+        sink.push(&final_text)?;
+        let remaining = stop_sequence.finish();
+        answer.push_str(&remaining);
+        sink.push(&remaining)?;
+        sink.finish()?;
+
+        Ok(Generation {
+            text: answer,
+            prompt_tokens: prompt.len(),
+            generated_tokens: generated,
+            finish_reason,
+        })
+    }
+}
+
 pub fn chat(
     path: &Path,
     options: ChatOptions,
     archive: ContextArchive,
     store: ContextStore,
 ) -> std::result::Result<(), String> {
-    let mut backend =
-        LlamaBackend::init().map_err(|error| format!("无法初始化 llama.cpp：{error}"))?;
-    backend.void_logs();
-    let model = LlamaModel::load_from_file(&backend, path, &LlamaModelParams::default())
-        .map_err(|error| format!("无法加载 GGUF 模型：{error}"))?;
-    let default_context_size = u32::try_from(DEFAULT_CONTEXT_TOKENS)
-        .map_err(|_| "上下文长度超出 llama.cpp 支持范围。".to_string())?;
-    let context_size = default_context_size.min(model.n_ctx_train()).max(1);
-    let mut context_params =
-        LlamaContextParams::default().with_n_ctx(NonZeroU32::new(context_size));
-    if let Some(threads) = options.threads {
-        let threads = i32::try_from(threads)
-            .map_err(|_| "--threads 超出 llama.cpp 支持范围。".to_string())?;
-        context_params = context_params.with_n_threads(threads);
-    }
-    let mut context = model
-        .new_context(&backend, context_params)
-        .map_err(|error| format!("无法创建 llama.cpp 推理上下文：{error}"))?;
-
+    let engine = Engine::load(path, options.threads)?;
     ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
         .map_err(|error| format!("无法安装 Ctrl-C 处理器：{error}"))?;
+    let mut context = engine.new_context()?;
     println!("已加载 llama.cpp GGUF 模型。输入 /exit 退出。");
-    chat_loop(&model, &mut context, &options, archive, store)
+    chat_loop(&engine, &mut context, &options, archive, store)
+}
+
+/// CLI 的文本输出目标:直接写 stdout 并逐段刷新。
+struct StdoutSink {
+    output: io::StdoutLock<'static>,
+}
+
+impl StdoutSink {
+    fn new() -> Self {
+        Self {
+            output: io::stdout().lock(),
+        }
+    }
+}
+
+impl TextSink for StdoutSink {
+    fn push(&mut self, text: &str) -> std::result::Result<(), String> {
+        self.output
+            .write_all(text.as_bytes())
+            .and_then(|()| self.output.flush())
+            .map_err(|error| format!("无法输出模型回答：{error}"))
+    }
+
+    fn finish(&mut self) -> std::result::Result<(), String> {
+        writeln!(self.output)
+            .and_then(|()| self.output.flush())
+            .map_err(|error| format!("无法结束模型回答：{error}"))
+    }
+
+    fn interrupted(&mut self) -> bool {
+        INTERRUPTED.swap(false, Ordering::SeqCst)
+    }
 }
 
 fn chat_loop(
-    model: &LlamaModel,
+    engine: &Engine,
     context: &mut LlamaContext<'_>,
     options: &ChatOptions,
     mut archive: ContextArchive,
     store: ContextStore,
 ) -> std::result::Result<(), String> {
-    let stop_markers = detect_stop_markers(model)?;
     let mut messages = Vec::with_capacity(archive.turns.len() * 2);
     for turn in &archive.turns {
-        messages.push(
-            LlamaChatMessage::new("user".into(), turn.user.clone())
-                .map_err(|error| format!("无法恢复上下文中的用户消息：{error}"))?,
-        );
-        messages.push(
-            LlamaChatMessage::new("assistant".into(), turn.assistant.clone())
-                .map_err(|error| format!("无法恢复上下文中的助手消息：{error}"))?,
-        );
+        messages.push(ChatMessage::new("user", turn.user.clone()));
+        messages.push(ChatMessage::new("assistant", turn.assistant.clone()));
     }
     let mut input = String::new();
     let stdin = io::stdin();
@@ -130,16 +416,9 @@ fn chat_loop(
             }
         }
 
-        let user_message = LlamaChatMessage::new("user".into(), prompt.into())
-            .map_err(|error| format!("无法创建用户消息：{error}"))?;
-        messages.push(user_message);
-        let (tokens, dropped_turns) = fit_prompt(
-            model,
-            options.system.as_deref(),
-            &mut messages,
-            options.max_tokens,
-            context.n_ctx(),
-        )?;
+        messages.push(ChatMessage::new("user", prompt));
+        let (tokens, dropped_turns) =
+            engine.prepare(&mut messages, options.system.as_deref(), options.max_tokens)?;
         archive.turns.drain(..dropped_turns);
 
         println!("正在处理输入并生成回答…");
@@ -147,62 +426,21 @@ fn chat_loop(
             .flush()
             .map_err(|error| format!("无法刷新输出：{error}"))?;
         let generation_started = Instant::now();
-        let (answer, generated) = generate(model, context, &tokens, options, &stop_markers)?;
-        messages.push(
-            LlamaChatMessage::new("assistant".into(), answer.clone())
-                .map_err(|error| format!("无法创建助手消息：{error}"))?,
-        );
+        let mut sink = StdoutSink::new();
+        let generation = engine.generate(context, &tokens, options, &[], &mut sink)?;
+        messages.push(ChatMessage::new("assistant", generation.text.clone()));
         archive.turns.push(ConversationTurn {
             user: prompt.to_string(),
-            assistant: answer,
+            assistant: generation.text,
         });
         let elapsed = generation_started.elapsed().as_secs_f64();
-        if generated > 0 && elapsed > 0.0 {
+        if generation.generated_tokens > 0 && elapsed > 0.0 {
             eprintln!(
-                "[生成 {generated} tokens，{:.1} tokens/s]",
-                generated as f64 / elapsed
+                "[生成 {} tokens，{:.1} tokens/s]",
+                generation.generated_tokens,
+                generation.generated_tokens as f64 / elapsed
             );
         }
-    }
-}
-
-fn fit_prompt(
-    model: &LlamaModel,
-    system: Option<&str>,
-    messages: &mut Vec<LlamaChatMessage>,
-    max_tokens: usize,
-    context_size: u32,
-) -> std::result::Result<(Vec<LlamaToken>, usize), String> {
-    let limit = usize::try_from(context_size)
-        .map_err(|_| "模型上下文长度超出当前平台支持范围。".to_string())?;
-    let mut dropped_turns = 0;
-    loop {
-        let mut prompt_messages =
-            Vec::with_capacity(messages.len() + usize::from(system.is_some()));
-        if let Some(system) = system {
-            prompt_messages.push(
-                LlamaChatMessage::new("system".into(), system.into())
-                    .map_err(|error| format!("无法创建系统消息：{error}"))?,
-            );
-        }
-        prompt_messages.extend(messages.iter().cloned());
-        let prompt = model
-            .apply_chat_template(None, &prompt_messages, true)
-            .map_err(|error| format!("无法应用 GGUF 对话模板：{error}"))?;
-        let tokens = model
-            .str_to_token(&prompt, AddBos::Always)
-            .map_err(|error| format!("无法编码输入文本：{error}"))?;
-        if tokens.len().saturating_add(max_tokens) <= limit {
-            return Ok((tokens, dropped_turns));
-        }
-        if messages.len() <= 1 {
-            return Err(format!(
-                "单轮输入加生成预留超过模型上下文上限 {limit} tokens，请缩短输入或减少 --max-tokens。"
-            ));
-        }
-        messages.drain(..2);
-        dropped_turns += 1;
-        eprintln!("上下文接近上限：已截断较早的对话轮次。");
     }
 }
 
@@ -243,113 +481,6 @@ fn template_ending(rendered: &str, probe: &str) -> Option<String> {
     let probe_end = rendered.rfind(probe)?.checked_add(probe.len())?;
     let ending = rendered[probe_end..].trim();
     (!ending.is_empty()).then(|| ending.to_string())
-}
-
-fn generate(
-    model: &LlamaModel,
-    context: &mut LlamaContext<'_>,
-    prompt: &[LlamaToken],
-    options: &ChatOptions,
-    stop_markers: &[String],
-) -> std::result::Result<(String, usize), String> {
-    if prompt.is_empty() {
-        return Err("输入未能转换为模型 token，请重试。".into());
-    }
-    let mut batch = LlamaBatch::new(BATCH_SIZE, 1);
-    context.clear_kv_cache();
-    for (chunk_index, chunk) in prompt.chunks(BATCH_SIZE).enumerate() {
-        batch.clear();
-        let chunk_start = chunk_index.saturating_mul(BATCH_SIZE);
-        let last_position = i32::try_from(chunk_start + chunk.len() - 1)
-            .map_err(|_| "输入 token 数超出 llama.cpp 支持范围。".to_string())?;
-        for (offset, token) in chunk.iter().copied().enumerate() {
-            let position = i32::try_from(chunk_start + offset)
-                .map_err(|_| "输入 token 数超出 llama.cpp 支持范围。".to_string())?;
-            batch
-                .add(token, position, &[0], position == last_position)
-                .map_err(|error| format!("无法准备输入批次：{error}"))?;
-        }
-        context
-            .decode(&mut batch)
-            .map_err(|error| format!("模型推理失败：{error}"))?;
-    }
-    let mut sampler = make_sampler(model, options)?;
-    for token in prompt.iter().copied() {
-        sampler.accept(token);
-    }
-    let mut stop_sequence = StopSequence::new(stop_markers.to_vec());
-    let mut decoder = encoding_rs::UTF_8.new_decoder();
-    let mut answer = String::new();
-    let mut output = io::stdout().lock();
-    let mut position = i32::try_from(prompt.len())
-        .map_err(|_| "输入 token 数超出 llama.cpp 支持范围。".to_string())?;
-    let mut generated = 0usize;
-
-    for _ in 0..options.max_tokens {
-        if INTERRUPTED.swap(false, Ordering::SeqCst) {
-            eprintln!("\n[已中断本轮生成]");
-            break;
-        }
-        let token = sampler.sample(context, batch.n_tokens() - 1);
-        if is_stop_token(token, model.token_eot(), model.is_eog_token(token)) {
-            break;
-        }
-        sampler.accept(token);
-
-        let bytes = model
-            .token_to_bytes(token, Special::Tokenize)
-            .map_err(|error| format!("无法解码模型回答：{error}"))?;
-        let mut text = String::with_capacity(bytes.len().saturating_mul(3).max(32));
-        let (decode_result, _, _) = decoder.decode_to_string(&bytes, &mut text, false);
-        if matches!(decode_result, encoding_rs::CoderResult::OutputFull) {
-            return Err("模型回答的 UTF-8 解码缓冲区不足。".to_string());
-        }
-        let (text, stopped) = stop_sequence.push(&text);
-        answer.push_str(&text);
-        output
-            .write_all(text.as_bytes())
-            .map_err(|error| format!("无法输出模型回答：{error}"))?;
-        output
-            .flush()
-            .map_err(|error| format!("无法刷新模型回答：{error}"))?;
-        generated += 1;
-        if stopped {
-            break;
-        }
-
-        batch.clear();
-        batch
-            .add(token, position, &[0], true)
-            .map_err(|error| format!("无法准备生成批次：{error}"))?;
-        context
-            .decode(&mut batch)
-            .map_err(|error| format!("模型推理失败：{error}"))?;
-        position = position
-            .checked_add(1)
-            .ok_or_else(|| "模型上下文位置溢出。".to_string())?;
-        if u32::try_from(position).unwrap_or(u32::MAX) >= context.n_ctx() {
-            break;
-        }
-    }
-
-    let mut final_text = String::new();
-    let (decode_result, _, _) = decoder.decode_to_string(&[], &mut final_text, true);
-    if matches!(decode_result, encoding_rs::CoderResult::OutputFull) {
-        return Err("模型回答的 UTF-8 解码缓冲区不足。".to_string());
-    }
-    let (final_text, _) = stop_sequence.push(&final_text);
-    answer.push_str(&final_text);
-    output
-        .write_all(final_text.as_bytes())
-        .and_then(|()| {
-            let remaining = stop_sequence.finish();
-            answer.push_str(&remaining);
-            output.write_all(remaining.as_bytes())
-        })
-        .and_then(|()| writeln!(output))
-        .and_then(|()| output.flush())
-        .map_err(|error| format!("无法结束模型回答：{error}"))?;
-    Ok((answer, generated))
 }
 
 fn is_stop_token(token: LlamaToken, end_of_turn: LlamaToken, is_eog: bool) -> bool {
@@ -534,5 +665,11 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn reports_finish_reasons_in_openai_wording() {
+        assert_eq!(FinishReason::Stop.as_str(), "stop");
+        assert_eq!(FinishReason::Length.as_str(), "length");
     }
 }

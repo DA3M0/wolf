@@ -17,6 +17,33 @@ pub enum ContextCommand {
     Delete(String),
 }
 
+/// `wolf serve` 的服务参数(模型解析、监听地址与鉴权)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServeOptions {
+    /// 模型名称或 GGUF 文件路径。
+    pub model: String,
+    /// 解析模型名称时搜索的目录。
+    pub model_dir: PathBuf,
+    pub host: String,
+    /// 0 表示由系统分配空闲端口。
+    pub port: u16,
+    pub generate_key: bool,
+    pub api_key: Option<String>,
+}
+
+impl Default for ServeOptions {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            model_dir: PathBuf::from("."),
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            generate_key: false,
+            api_key: None,
+        }
+    }
+}
+
 /// 运行期错误:参数/用法错误以退出码 2 报告,其余运行时错误以退出码 1 报告。
 #[derive(Debug)]
 pub enum RunError {
@@ -188,6 +215,133 @@ pub fn parse_context_args(
         }
     };
     Ok((operation, context))
+}
+
+pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), RunError> {
+    let mut serve = ServeOptions::default();
+    let mut options = DEFAULT_CHAT_OPTIONS;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--model" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| RunError::usage("--model 缺少模型名称或路径。"))?;
+                if value.is_empty() {
+                    return Err(RunError::usage("--model 不能为空。"));
+                }
+                if !serve.model.is_empty() {
+                    return Err(RunError::usage("--model 只能指定一次。"));
+                }
+                serve.model = value.clone();
+            }
+            "--model-dir" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| RunError::usage("--model-dir 缺少路径。"))?;
+                if value.is_empty() {
+                    return Err(RunError::usage("--model-dir 路径不能为空。"));
+                }
+                serve.model_dir = PathBuf::from(value);
+            }
+            "--host" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| RunError::usage("--host 缺少地址。"))?;
+                if value.is_empty() {
+                    return Err(RunError::usage("--host 不能为空。"));
+                }
+                serve.host = value.clone();
+            }
+            "--port" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| RunError::usage("--port 缺少端口号。"))?;
+                serve.port = value.parse::<u16>().map_err(|_| {
+                    RunError::usage(format!("--port 需要 0-65535 之间的端口，收到“{value}”。"))
+                })?;
+            }
+            "--generate-key" => {
+                if serve.generate_key {
+                    return Err(RunError::usage("--generate-key 只能指定一次。"));
+                }
+                serve.generate_key = true;
+            }
+            "--api-key" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| RunError::usage("--api-key 缺少密钥。"))?;
+                if value.is_empty() {
+                    return Err(RunError::usage("--api-key 不能为空。"));
+                }
+                if serve.api_key.replace(value.clone()).is_some() {
+                    return Err(RunError::usage("--api-key 只能指定一次。"));
+                }
+            }
+            "--threads" => {
+                index += 1;
+                options.threads = Some(parse_positive_option(args, index, "--threads")?);
+            }
+            "--max-tokens" => {
+                index += 1;
+                options.max_tokens = parse_positive_option(args, index, "--max-tokens")?;
+            }
+            "--temperature" => {
+                index += 1;
+                options.temperature = parse_float_option(args, index, "--temperature", 0.0)?;
+            }
+            "--top-p" => {
+                index += 1;
+                options.top_p = parse_bounded_float_option(args, index, "--top-p", 0.0, 1.0)?;
+            }
+            "--top-k" => {
+                index += 1;
+                options.top_k = parse_nonnegative_option(args, index, "--top-k")?;
+            }
+            "--repeat-penalty" => {
+                index += 1;
+                options.repeat_penalty =
+                    parse_bounded_float_option(args, index, "--repeat-penalty", 1.0, f64::MAX)?
+                        as f32;
+            }
+            "--seed" => {
+                index += 1;
+                options.seed = Some(parse_u64_option(args, index, "--seed")?);
+            }
+            "--system" => {
+                index += 1;
+                options.system = Some(parse_text_option(args, index, "--system")?);
+            }
+            option if option.starts_with('-') => {
+                return Err(RunError::usage(format!(
+                    "未知选项“{option}”。运行 `wolf help` 查看用法。"
+                )));
+            }
+            value => {
+                return Err(RunError::usage(format!(
+                    "serve 不接受位置参数“{value}”；请用 --model 指定模型。"
+                )));
+            }
+        }
+        index += 1;
+    }
+
+    if serve.model.is_empty() {
+        return Err(RunError::usage(
+            "请用 --model 指定模型名称或路径。用法：wolf serve --model <名称或路径> [选项]",
+        ));
+    }
+    if serve.generate_key && serve.api_key.is_some() {
+        return Err(RunError::usage(
+            "--generate-key 与 --api-key 不能同时使用。",
+        ));
+    }
+    Ok((serve, options))
 }
 
 pub fn parse_load_args(args: &[String]) -> Result<(PathBuf, bool, bool), RunError> {
@@ -452,5 +606,91 @@ mod tests {
             parse_context_args(&args(&["list"])).unwrap().0,
             ContextCommand::List
         );
+    }
+
+    #[test]
+    fn parses_serve_defaults() {
+        let (serve, options) = parse_serve_args(&args(&["--model", "qwen2.5-0.5b"])).unwrap();
+        assert_eq!(serve.model, "qwen2.5-0.5b");
+        assert_eq!(serve.model_dir, PathBuf::from("."));
+        assert_eq!(serve.host, "127.0.0.1");
+        assert_eq!(serve.port, 8080);
+        assert!(!serve.generate_key);
+        assert_eq!(serve.api_key, None);
+        assert_eq!(options, DEFAULT_CHAT_OPTIONS);
+    }
+
+    #[test]
+    fn parses_serve_options_and_generation_overrides() {
+        let (serve, options) = parse_serve_args(&args(&[
+            "--model",
+            "qwen2.5-0.5b",
+            "--model-dir",
+            "./models",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9000",
+            "--api-key",
+            "wolf-secret",
+            "--temperature",
+            "0.7",
+            "--max-tokens",
+            "512",
+        ]))
+        .unwrap();
+        assert_eq!(serve.model_dir, PathBuf::from("./models"));
+        assert_eq!(serve.host, "0.0.0.0");
+        assert_eq!(serve.port, 9000);
+        assert_eq!(serve.api_key.as_deref(), Some("wolf-secret"));
+        assert!(!serve.generate_key);
+        assert_eq!(options.temperature, 0.7);
+        assert_eq!(options.max_tokens, 512);
+    }
+
+    #[test]
+    fn accepts_ephemeral_port_and_generate_key() {
+        let (serve, _) = parse_serve_args(&args(&[
+            "--model",
+            "m.gguf",
+            "--port",
+            "0",
+            "--generate-key",
+        ]))
+        .unwrap();
+        assert_eq!(serve.port, 0);
+        assert!(serve.generate_key);
+    }
+
+    #[test]
+    fn serve_rejects_mutually_exclusive_keys() {
+        let error = parse_serve_args(&args(&[
+            "--model",
+            "m.gguf",
+            "--generate-key",
+            "--api-key",
+            "wolf-secret",
+        ]))
+        .unwrap_err();
+        assert!(matches!(error, RunError::Usage(_)));
+        assert!(error.to_string().contains("不能同时使用"));
+    }
+
+    #[test]
+    fn serve_rejects_missing_model_and_invalid_port() {
+        assert!(matches!(
+            parse_serve_args(&args(&["--port", "8080"])).unwrap_err(),
+            RunError::Usage(_)
+        ));
+        let error = parse_serve_args(&args(&["--model", "m.gguf", "--port", "70000"])).unwrap_err();
+        assert!(matches!(error, RunError::Usage(_)));
+        assert!(error.to_string().contains("0-65535"));
+    }
+
+    #[test]
+    fn serve_rejects_positional_arguments() {
+        let error = parse_serve_args(&args(&["--model", "m.gguf", "extra"]));
+        assert!(error.is_err());
+        assert!(error.unwrap_err().to_string().contains("位置参数"));
     }
 }

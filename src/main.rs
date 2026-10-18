@@ -5,6 +5,7 @@ mod cli;
 mod context;
 mod inspect;
 mod options;
+mod serve;
 
 use cli::{ContextCommand, RunError};
 use context::{ContextArchive, ContextStore};
@@ -60,6 +61,10 @@ fn run(args: Vec<String>) -> Result<(), RunError> {
         "context" => {
             let (operation, options) = cli::parse_context_args(&args[1..])?;
             run_context_command(operation, options.directory)
+        }
+        "serve" => {
+            let (serve_options, chat_options) = cli::parse_serve_args(&args[1..])?;
+            runtime(serve::serve(serve_options, chat_options))
         }
         value if !value.starts_with('-') => {
             let (path, options, context_options) = cli::parse_chat_args(&args)?;
@@ -127,6 +132,7 @@ fn print_help() {
 用法：\n\
   wolf <模型路径>                         加载 GGUF 模型并进入多轮对话\n\
   wolf chat <模型路径>                    同上\n\
+  wolf serve --model <名称> [选项]        以 OpenAI 兼容 API 服务运行\n\
   wolf load <模型文件> [--all] [--json]   加载并显示模型信息\n\
   wolf inspect <模型文件> [--all] [--json]（load 的别名）\n\
   wolf context list [--context-dir <路径>]  列出已保存上下文\n\
@@ -147,19 +153,38 @@ fn print_help() {
   --context <名称>     恢复已保存的对话上下文\n\
   --context-dir <路径> 上下文存档目录（也可用于 /save）\n\
 \n\
+服务选项（wolf serve）：\n\
+  --model <名称>        模型名称或 .gguf 文件路径（必填）\n\
+  --model-dir <目录>    按名称搜索模型的目录（默认 .）\n\
+  --host <地址>         监听地址（默认 127.0.0.1）\n\
+  --port <端口>         监听端口（默认 8080，0 为系统分配）\n\
+  --generate-key        自动生成 API Key 并打印\n\
+  --api-key <KEY>       指定 API Key\n\
+  【以上选项可与对话选项共用，设置服务默认采样参数】\n\
+\n\
+服务 API 端点：\n\
+  POST /v1/chat/completions    支持流式（SSE）\n\
+  POST /v1/completions         仅非流式，prompt 作为单条消息\n\
+  GET  /v1/models              列出已加载模型\n\
+  GET  /v1/models/:id          获取单个模型\n\
+  GET  /health                 健康检查（免鉴权）\n\
+\n\
 示例：\n\
   wolf ./models/llama-2-7b-chat.Q4_K_M.gguf\n\
   wolf ./models/model.gguf --threads 8 --max-tokens 128\n\
   wolf ./models/model.gguf --temperature 0.7 --top-k 50 --seed 42\n\
   wolf ./models/model.gguf --system \"你是一个简洁的中文助手\"\n\
   wolf ./models/model.gguf --temperature 0\n\
+  wolf serve --model qwen2.5-0.5b --model-dir ./models --port 8080 --generate-key\n\
+  wolf serve --model qwen2.5-0.5b.gguf --port 8080 --api-key wolf-secret --temperature 0\n\
   wolf /data/models/llama.gguf\n\
   wolf chat \"C:\\\\models\\\\llama.gguf\"\n\
   wolf load ./model.safetensors\n\
   wolf load ./model.gguf --all\n\
   wolf inspect ./model.safetensors --json\n\
 \n\
-对话中输入 /exit 退出。GGUF 推理由 llama.cpp 提供。Safetensors 仅支持文件检查。"
+对话中输入 /exit 退出。GGUF 推理由 llama.cpp 提供。Safetensors 仅支持文件检查。\n\
+服务模式下 Ctrl-C 停止服务；不支持工具/函数调用。"
     );
 }
 

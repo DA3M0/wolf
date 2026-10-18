@@ -2,6 +2,8 @@
 
 mod llama;
 
+pub(crate) use llama::{ChatMessage, Engine, Generation, TextSink};
+
 use crate::context::{ContextArchive, ContextStore};
 use crate::options::ChatOptions;
 use std::path::Path;
@@ -19,7 +21,7 @@ pub fn chat(
     llama::chat(path, options, archive, store)
 }
 
-fn configure_threads(threads: Option<usize>) -> Result<(), String> {
+pub(crate) fn configure_threads(threads: Option<usize>) -> Result<(), String> {
     if let Some(threads) = threads {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)

@@ -169,6 +169,96 @@ wolf inspect ./models/model.safetensors --json
 
 退出码约定：参数或用法错误为 `2`，其他运行时错误为 `1`，成功为 `0`。
 
+### 7. 以本地 API 服务运行（wolf serve）
+
+`wolf serve` 加载一个 GGUF 模型并对外提供 OpenAI 兼容的 HTTP 接口，让 Agent（Cline / Continue / Aider 等）可以用标准 `openai` 客户端调用本地模型：
+
+```sh
+wolf serve --model-dir ./models --model qwen2.5-0.5b --port 8080 --generate-key
+```
+
+启动后输出：
+
+```text
+已加载模型：./models/qwen2.5-0.5b.gguf
+已启动服务: http://localhost:8080
+API Key: wolf-8f3a1c...
+```
+
+Ctrl-C 停止服务。
+
+#### 服务选项
+
+| 选项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--model <名称>` | 必填 | 模型名称或 `.gguf` 文件路径 |
+| `--model-dir <目录>` | `.` | 按名称搜索模型的目录 |
+| `--host <地址>` | `127.0.0.1` | 监听地址 |
+| `--port <端口>` | `8080` | 监听端口（`0` = 系统分配） |
+| `--generate-key` | 关闭 | 自动生成 API Key 并打印 |
+| `--api-key <KEY>` | 无 | 指定 API Key（与 `--generate-key` 互斥） |
+
+服务选项可与对话选项（`--threads`、`--max-tokens`、`--temperature`、`--top-p`、`--top-k`、`--repeat-penalty`、`--seed`、`--system`）共用，用于设置服务的默认采样参数。请求中的同名字段会覆盖这些默认值。
+
+未提供 `--generate-key` 或 `--api-key` 时，服务仅允许监听回环地址（`127.0.0.1` / `localhost` / `::1`）；若要监听非回环地址（如 `0.0.0.0`），必须显式启用鉴权，避免误暴露到局域网。
+
+#### API 端点
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/v1/chat/completions` | 对话补全，支持流式（SSE，`stream: true`） |
+| `POST` | `/v1/completions` | 文本补全，`prompt` 作为单条用户消息（仅非流式） |
+| `GET` | `/v1/models` | 列出已加载模型 |
+| `GET` | `/v1/models/:id` | 获取单个模型 |
+| `GET` | `/health` | 健康检查（免鉴权） |
+
+所有请求（`/health` 除外）须携带 `Authorization: Bearer <API Key>` 头。错误响应使用 OpenAI 风格的 JSON 结构。
+
+#### curl 示例
+
+```sh
+# 列出模型
+curl -H "Authorization: Bearer wolf-8f3a1c..." http://localhost:8080/v1/models
+
+# 非流式对话
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer wolf-8f3a1c..." \
+  -d '{"messages":[{"role":"user","content":"你好"}],"max_tokens":128}'
+
+# 流式对话
+curl -N -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer wolf-8f3a1c..." \
+  -d '{"messages":[{"role":"user","content":"你好"}],"stream":true}'
+```
+
+#### OpenAI 客户端示例
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="wolf-8f3a1c...",
+)
+
+response = client.chat.completions.create(
+    model="qwen2.5-0.5b",
+    messages=[{"role": "user", "content": "你好"}],
+    max_tokens=128,
+)
+print(response.choices[0].message.content)
+```
+
+#### 支持的请求字段
+
+`POST /v1/chat/completions` 支持：`model`、`messages`（`content` 可为字符串或文本数组）、`stream`、`temperature`、`top_p`、`top_k`、`max_tokens` / `max_completion_tokens`、`stop`（字符串或数组）、`seed`、`n`（仅 `1`）。角色支持 `system` / `developer`（映射为 `system`） / `user` / `assistant`。
+
+`model` 字段可以省略；若填写，必须等于已加载模型的 ID（即 `/v1/models` 返回的 `id`，默认为文件名去掉 `.gguf`），否则返回 404。服务一次只加载一个模型，并发请求按到达顺序串行推理。
+
+**不支持工具/函数调用**（`tools`、`tool_calls`）：引擎无 grammar/工具支持。多模型热加载、`/v1/embeddings`、`/v1/audio`、`/v1/images` 均不支持。
+
 ## 支持范围
 
 - **对话推理：** 仅支持 GGUF，由 llama.cpp 推理，可使用其支持的 GGUF 架构与模型内置聊天模板；默认 CPU，可通过 Vulkan/CUDA/ROCm/Metal Cargo feature 自行构建 GPU 后端。oneAPI/SYCL 暂未支持。
