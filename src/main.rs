@@ -132,7 +132,7 @@ fn print_help() {
 用法：\n\
   wolf <模型路径>                         加载 GGUF 模型并进入多轮对话\n\
   wolf chat <模型路径>                    同上\n\
-  wolf serve --model <名称> [选项]        以 OpenAI 兼容 API 服务运行\n\
+  wolf serve <名称或路径> [选项]         以 OpenAI 兼容 API 服务运行\n\
   wolf load <模型文件> [--all] [--json]   加载并显示模型信息\n\
   wolf inspect <模型文件> [--all] [--json]（load 的别名）\n\
   wolf context list [--context-dir <路径>]  列出已保存上下文\n\
@@ -154,7 +154,7 @@ fn print_help() {
   --context-dir <路径> 上下文存档目录（也可用于 /save）\n\
 \n\
 服务选项（wolf serve）：\n\
-  --model <名称>        模型名称或 .gguf 文件路径（必填）\n\
+  --model <名称>        模型名称或 .gguf 文件路径（兼容旧写法）\n\
   --model-dir <目录>    按名称搜索模型的目录（默认 .）\n\
   --host <地址>         监听地址（默认 127.0.0.1）\n\
   --port <端口>         监听端口（默认 8080，0 为系统分配）\n\
@@ -175,8 +175,8 @@ fn print_help() {
   wolf ./models/model.gguf --temperature 0.7 --top-k 50 --seed 42\n\
   wolf ./models/model.gguf --system \"你是一个简洁的中文助手\"\n\
   wolf ./models/model.gguf --temperature 0\n\
-  wolf serve --model qwen2.5-0.5b --model-dir ./models --port 8080 --generate-key\n\
-  wolf serve --model qwen2.5-0.5b.gguf --port 8080 --api-key wolf-secret --temperature 0\n\
+  wolf serve qwen2.5-0.5b --model-dir ./models --port 8080 --generate-key\n\
+  wolf serve qwen2.5-0.5b.gguf --port 8080 --api-key wolf-secret --temperature 0\n\
   wolf /data/models/llama.gguf\n\
   wolf chat \"C:\\\\models\\\\llama.gguf\"\n\
   wolf load ./model.safetensors\n\

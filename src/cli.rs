@@ -232,7 +232,9 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
                     return Err(RunError::usage("--model 不能为空。"));
                 }
                 if !serve.model.is_empty() {
-                    return Err(RunError::usage("--model 只能指定一次。"));
+                    return Err(RunError::usage(
+                        "模型只能指定一次；位置参数与 --model 不能同时使用。",
+                    ));
                 }
                 serve.model = value.clone();
             }
@@ -323,9 +325,12 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
                 )));
             }
             value => {
-                return Err(RunError::usage(format!(
-                    "serve 不接受位置参数“{value}”；请用 --model 指定模型。"
-                )));
+                if !serve.model.is_empty() {
+                    return Err(RunError::usage(
+                        "serve 只能指定一个模型名称或路径；旧写法可用 --model。",
+                    ));
+                }
+                serve.model = value.to_string();
             }
         }
         index += 1;
@@ -333,7 +338,7 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
 
     if serve.model.is_empty() {
         return Err(RunError::usage(
-            "请用 --model 指定模型名称或路径。用法：wolf serve --model <名称或路径> [选项]",
+            "请指定模型名称或路径。用法：wolf serve <名称或路径> [选项]",
         ));
     }
     if serve.generate_key && serve.api_key.is_some() {
@@ -610,7 +615,7 @@ mod tests {
 
     #[test]
     fn parses_serve_defaults() {
-        let (serve, options) = parse_serve_args(&args(&["--model", "qwen2.5-0.5b"])).unwrap();
+        let (serve, options) = parse_serve_args(&args(&["qwen2.5-0.5b"])).unwrap();
         assert_eq!(serve.model, "qwen2.5-0.5b");
         assert_eq!(serve.model_dir, PathBuf::from("."));
         assert_eq!(serve.host, "127.0.0.1");
@@ -688,9 +693,31 @@ mod tests {
     }
 
     #[test]
-    fn serve_rejects_positional_arguments() {
-        let error = parse_serve_args(&args(&["--model", "m.gguf", "extra"]));
-        assert!(error.is_err());
-        assert!(error.unwrap_err().to_string().contains("位置参数"));
+    fn parses_positional_serve_model_and_options() {
+        let (serve, options) = parse_serve_args(&args(&[
+            "m.gguf",
+            "--model-dir",
+            "./models",
+            "--port",
+            "9000",
+        ]))
+        .unwrap();
+        assert_eq!(serve.model, "m.gguf");
+        assert_eq!(serve.model_dir, PathBuf::from("./models"));
+        assert_eq!(serve.port, 9000);
+        assert_eq!(options, DEFAULT_CHAT_OPTIONS);
+    }
+
+    #[test]
+    fn serve_rejects_multiple_model_arguments() {
+        for values in [
+            args(&["m.gguf", "other.gguf"]),
+            args(&["m.gguf", "--model", "other.gguf"]),
+            args(&["--model", "m.gguf", "other.gguf"]),
+        ] {
+            let error = parse_serve_args(&values).unwrap_err();
+            assert!(matches!(error, RunError::Usage(_)));
+            assert!(error.to_string().contains("模型"));
+        }
     }
 }

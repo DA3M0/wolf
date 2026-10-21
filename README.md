@@ -174,7 +174,7 @@ wolf inspect ./models/model.safetensors --json
 `wolf serve` 加载一个 GGUF 模型并对外提供 OpenAI 兼容的 HTTP 接口，让 Agent（Cline / Continue / Aider 等）可以用标准 `openai` 客户端调用本地模型：
 
 ```sh
-wolf serve --model-dir ./models --model qwen2.5-0.5b --port 8080 --generate-key
+wolf serve qwen2.5-0.5b --model-dir ./models --port 8080 --generate-key
 ```
 
 启动后输出：
@@ -191,7 +191,7 @@ Ctrl-C 停止服务。
 
 | 选项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--model <名称>` | 必填 | 模型名称或 `.gguf` 文件路径 |
+| `<名称或路径>` | 必填 | 模型名称或 `.gguf` 文件路径；也兼容旧写法 `--model <名称或路径>` |
 | `--model-dir <目录>` | `.` | 按名称搜索模型的目录 |
 | `--host <地址>` | `127.0.0.1` | 监听地址 |
 | `--port <端口>` | `8080` | 监听端口（`0` = 系统分配） |
@@ -199,6 +199,8 @@ Ctrl-C 停止服务。
 | `--api-key <KEY>` | 无 | 指定 API Key（与 `--generate-key` 互斥） |
 
 服务选项可与对话选项（`--threads`、`--max-tokens`、`--temperature`、`--top-p`、`--top-k`、`--repeat-penalty`、`--seed`、`--system`）共用，用于设置服务的默认采样参数。请求中的同名字段会覆盖这些默认值。
+
+模型名或路径建议直接作为 `wolf serve` 后的第一个参数；已有脚本仍可使用 `--model <名称或路径>`。
 
 未提供 `--generate-key` 或 `--api-key` 时，服务仅允许监听回环地址（`127.0.0.1` / `localhost` / `::1`）；若要监听非回环地址（如 `0.0.0.0`），必须显式启用鉴权，避免误暴露到局域网。
 
