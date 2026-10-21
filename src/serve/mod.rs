@@ -323,11 +323,29 @@ mod tests {
             model_dir: temp.clone(),
             ..Default::default()
         };
-        let err = resolve_model(&options).unwrap_err();
-        assert!(
-            err.contains("不唯一"),
-            "expected ambiguity message, got: {err}"
-        );
+        let gguf_count = std::fs::read_dir(&temp)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+            })
+            .count();
+
+        if gguf_count > 1 {
+            let err = resolve_model(&options).unwrap_err();
+            assert!(
+                err.contains("不唯一"),
+                "expected ambiguity message, got: {err}"
+            );
+        } else {
+            // Case-insensitive filesystems collapse these differently-cased names.
+            let (_, id) = resolve_model(&options).unwrap();
+            assert!(id.eq_ignore_ascii_case("model-a"), "got: {id}");
+        }
         std::fs::remove_dir_all(&temp).ok();
     }
 
