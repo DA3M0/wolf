@@ -1430,8 +1430,9 @@ dependencies = [
 
 [[package]]
 name = "wolf"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
+ "cc",
  "ctrlc",
  "encoding_rs",
  "llama-cpp-4",
