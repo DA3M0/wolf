@@ -364,15 +364,37 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
     Ok((serve, options))
 }
 
-pub fn parse_load_args(args: &[String]) -> Result<(PathBuf, bool, bool), RunError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectOptions {
+    pub path: PathBuf,
+    pub json: bool,
+    pub show_all: bool,
+    pub output: Option<PathBuf>,
+}
+
+pub fn parse_inspect_args(args: &[String]) -> Result<InspectOptions, RunError> {
     let mut path = None;
     let mut json = false;
     let mut show_all = false;
+    let mut output = None;
 
-    for arg in args {
-        match arg.as_str() {
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
             "--json" => json = true,
             "--all" => show_all = true,
+            "-o" | "--output" => {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| {
+                    RunError::usage(format!("{} 缺少输出文件路径。", args[index - 1]))
+                })?;
+                if value.is_empty() {
+                    return Err(RunError::usage("输出文件路径不能为空。"));
+                }
+                if output.replace(PathBuf::from(value)).is_some() {
+                    return Err(RunError::usage("-o/--output 只能指定一次。"));
+                }
+            }
             value if value.starts_with('-') => {
                 return Err(RunError::usage(format!(
                     "未知选项“{value}”。运行 `wolf help` 查看用法。"
@@ -384,12 +406,20 @@ pub fn parse_load_args(args: &[String]) -> Result<(PathBuf, bool, bool), RunErro
                 }
             }
         }
+        index += 1;
     }
 
     let path = path.ok_or_else(|| {
-        RunError::usage("缺少模型文件路径。用法：wolf load <模型文件> [--all] [--json]")
+        RunError::usage(
+            "缺少模型文件路径。用法：wolf inspect <模型文件> [--all] [--json] [-o <文件>]",
+        )
     })?;
-    Ok((path, json, show_all))
+    Ok(InspectOptions {
+        path,
+        json,
+        show_all,
+        output,
+    })
 }
 
 pub fn parse_positive_option(
@@ -712,22 +742,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_positional_serve_model_and_options() {
-        let (serve, options) = parse_serve_args(&args(&[
-            "m.gguf",
-            "--model-dir",
-            "./models",
-            "--port",
-            "9000",
-        ]))
-        .unwrap();
-        assert_eq!(serve.model, "m.gguf");
-        assert_eq!(serve.model_dir, PathBuf::from("./models"));
-        assert_eq!(serve.port, 9000);
-        assert_eq!(options, DEFAULT_CHAT_OPTIONS);
-    }
-
-    #[test]
     fn serve_rejects_invalid_or_repeated_generation_limit() {
         for values in [
             args(&["m.gguf", "--max-concurrent-generations", "0"]),
@@ -747,6 +761,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_positional_serve_model_and_options() {
+        let (serve, options) = parse_serve_args(&args(&[
+            "m.gguf",
+            "--model-dir",
+            "./models",
+            "--port",
+            "9000",
+        ]))
+        .unwrap();
+        assert_eq!(serve.model, "m.gguf");
+        assert_eq!(serve.model_dir, PathBuf::from("./models"));
+        assert_eq!(serve.port, 9000);
+        assert_eq!(options, DEFAULT_CHAT_OPTIONS);
+    }
+
+    #[test]
     fn serve_rejects_multiple_model_arguments() {
         for values in [
             args(&["m.gguf", "other.gguf"]),
@@ -756,6 +786,36 @@ mod tests {
             let error = parse_serve_args(&values).unwrap_err();
             assert!(matches!(error, RunError::Usage(_)));
             assert!(error.to_string().contains("模型"));
+        }
+    }
+
+    #[test]
+    fn parses_inspect_output_options() {
+        let options = parse_inspect_args(&args(&[
+            "model.gguf",
+            "--all",
+            "--json",
+            "-o",
+            "report.json",
+        ]))
+        .unwrap();
+        assert_eq!(options.path, PathBuf::from("model.gguf"));
+        assert!(options.show_all);
+        assert!(options.json);
+        assert_eq!(options.output, Some(PathBuf::from("report.json")));
+    }
+
+    #[test]
+    fn inspect_rejects_missing_or_repeated_output_path() {
+        for values in [
+            args(&["model.gguf", "--output"]),
+            args(&["model.gguf", "-o"]),
+            args(&["model.gguf", "-o", "one.txt", "--output", "two.txt"]),
+        ] {
+            assert!(matches!(
+                parse_inspect_args(&values).unwrap_err(),
+                RunError::Usage(_)
+            ));
         }
     }
 }

@@ -150,22 +150,22 @@ wolf chat /data/models/model.gguf
 wolf help
 wolf formats
 
-# 显示模型信息，默认最多显示 20 个张量
-wolf load ./models/model.gguf
-wolf load /data/models/model.safetensors
+# 检查模型信息，默认最多显示 20 个张量
+wolf inspect ./models/model.gguf
+wolf inspect /data/models/model.safetensors
 
 # 显示全部张量，或输出 JSON
-wolf load ./models/model.gguf --all
-wolf load ./models/model.safetensors --json
-```
-
-`inspect` 是 `load` 的别名，例如：
-
-```sh
+wolf inspect ./models/model.gguf --all
 wolf inspect ./models/model.safetensors --json
+
+# 将文本报告或 JSON 报告写入文件（覆盖已有文件，不打印到终端）
+wolf inspect ./models/model.gguf --output report.txt
+wolf inspect ./models/model.gguf --json -o report.json
 ```
 
-检查会校验文件头部、张量数据范围，并检测张量数据是否互相重叠或越界（GGUF 与 Safetensors 均支持）。无法确定大小的 GGUF 量化类型会跳过重叠检测。
+`wolf load` 是 `wolf inspect` 的兼容别名。检查会校验文件头部、张量数据范围，并检测张量数据是否互相重叠或越界（GGUF 与 Safetensors 均支持）。无法确定大小的 GGUF 量化类型会跳过重叠检测。
+
+指定 `-o/--output` 时，报告以所选格式（默认文本，`--json` 为 JSON）写入文件，不输出到终端；已有目标文件会被覆盖。不指定输出文件则显示在终端。
 
 退出码约定：参数或用法错误为 `2`，其他运行时错误为 `1`，成功为 `0`。
 

@@ -44,16 +44,7 @@ fn run(args: Vec<String>) -> Result<(), RunError> {
             println!("wolf {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        "load" | "inspect" => {
-            let (path, json, show_all) = cli::parse_load_args(&args[1..])?;
-            let info = runtime(inspect::inspect_model(&path))?;
-            if json {
-                print_json(&info)?;
-            } else {
-                print_model(&info, show_all);
-            }
-            Ok(())
-        }
+        "load" | "inspect" => run_inspect_command(&args[1..]),
         "chat" => {
             let (path, options, context_options) = cli::parse_chat_args(&args[1..])?;
             run_chat(&path, options, context_options)
@@ -74,6 +65,28 @@ fn run(args: Vec<String>) -> Result<(), RunError> {
             "未知命令“{other}”。运行 `wolf help` 查看用法。"
         ))),
     }
+}
+
+fn run_inspect_command(args: &[String]) -> Result<(), RunError> {
+    let options = cli::parse_inspect_args(args)?;
+    let info = runtime(inspect::inspect_model(&options.path))?;
+    let report = if options.json {
+        render_json(&info)?
+    } else {
+        render_model(&info, options.show_all)
+    };
+    if let Some(path) = options.output {
+        write_report(&path, &report)?;
+    } else {
+        println!("{report}");
+    }
+    Ok(())
+}
+
+fn write_report(path: &Path, report: &str) -> Result<(), RunError> {
+    std::fs::write(path, format!("{report}\n")).map_err(|error| {
+        RunError::Runtime(format!("无法写入检查报告“{}”：{error}", path.display()))
+    })
 }
 
 fn run_chat(
@@ -133,8 +146,8 @@ fn print_help() {
   wolf <模型路径>                         加载 GGUF 模型并进入多轮对话\n\
   wolf chat <模型路径>                    同上\n\
   wolf serve <名称或路径> [选项]         以 OpenAI 兼容 API 服务运行\n\
-  wolf load <模型文件> [--all] [--json]   加载并显示模型信息\n\
-  wolf inspect <模型文件> [--all] [--json]（load 的别名）\n\
+  wolf inspect <模型文件> [选项]          检查 GGUF 或 Safetensors 文件\n\
+  wolf load <模型文件> [选项]             inspect 的兼容别名\n\
   wolf context list [--context-dir <路径>]  列出已保存上下文\n\
   wolf context delete <名称> [--context-dir <路径>]  删除上下文\n\
   wolf formats                            列出支持的格式\n\
@@ -163,6 +176,11 @@ fn print_help() {
   --api-key <KEY>       指定 API Key\n\
   【以上选项可与对话选项共用，设置服务默认采样参数】\n\
 \n\
+检查选项（wolf inspect）：\n\
+  --all                 显示全部张量（默认最多 20 个）\n\
+  --json                输出 JSON 格式\n\
+  -o, --output <文件>   保存报告到文件（覆盖已有文件，不打印到终端）\n\
+\n\
 服务 API 端点：\n\
   POST /v1/chat/completions    支持流式（SSE）\n\
   POST /v1/completions         仅非流式，prompt 作为单条消息\n\
@@ -180,30 +198,34 @@ fn print_help() {
   wolf serve qwen2.5-0.5b.gguf --port 8080 --api-key wolf-secret --temperature 0\n\
   wolf /data/models/llama.gguf\n\
   wolf chat \"C:\\\\models\\\\llama.gguf\"\n\
-  wolf load ./model.safetensors\n\
-  wolf load ./model.gguf --all\n\
+  wolf inspect ./model.safetensors\n\
+  wolf inspect ./model.gguf --all\n\
   wolf inspect ./model.safetensors --json\n\
+  wolf inspect ./model.gguf --json --output report.json\n\
 \n\
 对话中输入 /exit 退出。GGUF 推理由 llama.cpp 提供。Safetensors 仅支持文件检查。\n\
 服务模式下 Ctrl-C 停止服务；不支持工具/函数调用。"
     );
 }
 
-fn print_model(info: &ModelInfo, show_all: bool) {
-    println!("模型：{}", info.path.display());
-    println!("格式：{}", info.format);
-    println!("文件大小：{}", format_size(info.file_size));
-    println!("张量数量：{}", info.tensors.len());
-    println!("状态：已映射文件并验证头部");
+fn render_model(info: &ModelInfo, show_all: bool) -> String {
+    let mut output = String::new();
+    use std::fmt::Write as _;
+
+    writeln!(&mut output, "模型：{}", info.path.display()).unwrap();
+    writeln!(&mut output, "格式：{}", info.format).unwrap();
+    writeln!(&mut output, "文件大小：{}", format_size(info.file_size)).unwrap();
+    writeln!(&mut output, "张量数量：{}", info.tensors.len()).unwrap();
+    writeln!(&mut output, "状态：已映射文件并验证头部").unwrap();
 
     if !info.metadata.is_empty() {
-        println!("\n元数据：");
+        output.push_str("\n元数据：\n");
         for (key, value) in &info.metadata {
-            println!("  {key}: {value}");
+            writeln!(&mut output, "  {key}: {value}").unwrap();
         }
     }
     if !info.tensors.is_empty() {
-        println!("\n张量：");
+        output.push_str("\n张量：\n");
         let count = if show_all {
             info.tensors.len()
         } else {
@@ -214,21 +236,26 @@ fn print_model(info: &ModelInfo, show_all: bool) {
                 .bytes
                 .map(|size| format!("  {}", format_size(size)))
                 .unwrap_or_default();
-            println!(
+            writeln!(
+                &mut output,
                 "  {}  {:?}  {}{}",
                 tensor.name, tensor.shape, tensor.dtype, bytes
-            );
+            )
+            .unwrap();
         }
         if count < info.tensors.len() {
-            println!(
+            writeln!(
+                &mut output,
                 "  …另有 {} 个张量未显示（使用 --all 查看）",
                 info.tensors.len() - count
-            );
+            )
+            .unwrap();
         }
     }
+    output.trim_end().to_string()
 }
 
-fn print_json(info: &ModelInfo) -> Result<(), RunError> {
+fn render_json(info: &ModelInfo) -> Result<String, RunError> {
     let output = serde_json::json!({
         "path": info.path,
         "format": info.format,
@@ -242,12 +269,8 @@ fn print_json(info: &ModelInfo) -> Result<(), RunError> {
             "bytes": tensor.bytes,
         })).collect::<Vec<_>>(),
     });
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&output)
-            .map_err(|error| RunError::Runtime(format!("无法生成 JSON 输出：{error}")))?
-    );
-    Ok(())
+    serde_json::to_string_pretty(&output)
+        .map_err(|error| RunError::Runtime(format!("无法生成 JSON 输出：{error}")))
 }
 
 fn format_size(size: u64) -> String {
@@ -266,3 +289,63 @@ fn format_size(size: u64) -> String {
 }
 
 const DEFAULT_TENSOR_LIMIT: usize = 20;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn inspect_text_export_limits_tensors_by_default() {
+        let info = ModelInfo {
+            path: PathBuf::from("model.gguf"),
+            file_size: 1,
+            format: "GGUF".to_string(),
+            tensors: (0..21)
+                .map(|index| inspect::TensorInfo {
+                    name: format!("tensor_{index}"),
+                    shape: vec![1],
+                    dtype: "F32".to_string(),
+                    bytes: Some(4),
+                })
+                .collect(),
+            metadata: Vec::new(),
+        };
+        let report = render_model(&info, false);
+        assert!(report.contains("tensor_19"));
+        assert!(!report.contains("tensor_20"));
+        assert!(report.contains("另有 1 个张量未显示"));
+        assert!(render_model(&info, true).contains("tensor_20"));
+    }
+
+    #[test]
+    fn inspect_json_export_preserves_structured_schema() {
+        let info = ModelInfo {
+            path: PathBuf::from("model.gguf"),
+            file_size: 1,
+            format: "GGUF".to_string(),
+            tensors: Vec::new(),
+            metadata: Vec::new(),
+        };
+        let report: serde_json::Value = serde_json::from_str(&render_json(&info).unwrap()).unwrap();
+        assert_eq!(report["tensor_count"], 0);
+        assert_eq!(report["format"], "GGUF");
+    }
+
+    #[test]
+    fn inspect_report_export_overwrites_existing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "wolf-report-{}-{}.txt",
+            std::process::id(),
+            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, "old report").unwrap();
+
+        write_report(&path, "new report").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new report\n");
+        std::fs::remove_file(path).unwrap();
+    }
+}
