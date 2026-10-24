@@ -27,6 +27,14 @@ sudo apt install build-essential cmake libvulkan-dev glslc
 cargo build --release --features vulkan
 ```
 
+For faster CPU inference on a specific machine, build with the optional `native` feature:
+
+```sh
+cargo build --release --features native
+```
+
+This enables llama.cpp's CPU auto-tuning (`GGML_NATIVE`), allowing it to use instruction sets supported by the CPU on the build machine (for example, AVX2 on x86-64 or NEON on ARM). SIMD-optimized kernels can improve inference speed, especially for CPU-bound workloads, though the actual gain depends on the model and hardware. Build on the machine that will run the binary: this option tunes for the build host, is not a cross-compilation target selector, and the resulting binary may not run on older CPUs or other machines without the same instruction-set support. Keep the default build for portable binaries and release artifacts. To combine CPU tuning with a GPU backend, enable both features, for example `cargo build --release --features "native,vulkan"`.
+
 On Windows, install the [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home) and ensure the MSVC C++ build tools are available. On macOS, you can use the Metal feature; to use Vulkan, install the LunarG Vulkan SDK/MoltenVK and set `VULKAN_SDK`. If the Vulkan SDK is unavailable when building on macOS, the underlying dependency falls back to Metal. On other Linux distributions, install the corresponding Vulkan development packages and `glslc`.
 
 Other GPU backends also require their toolchains to be installed locally before building:
@@ -223,7 +231,7 @@ All requests except `/health` must include an `Authorization: ****** Key>` heade
 
 ```sh
 # List models
-curl -H "Authorization: ******" http://localhost:8080/v1/models
+curl -H "Authorization: <your api_key>" http://localhost:8080/v1/models
 
 # Non-streaming chat
 curl -X POST http://localhost:8080/v1/chat/completions \

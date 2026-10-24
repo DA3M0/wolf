@@ -19,6 +19,7 @@ debug = "line-tables-only"
 [features]
 default = ["openmp"]
 openmp = ["llama-cpp-4/openmp"]
+native = ["llama-cpp-4/native"]
 vulkan = ["llama-cpp-4/vulkan"]
 cuda = ["llama-cpp-4/cuda"]
 rocm = ["llama-cpp-4/hip"]
