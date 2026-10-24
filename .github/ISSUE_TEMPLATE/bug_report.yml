@@ -1,69 +1,69 @@
-name: Bug 反馈
-description: 报告 wolf 中的问题
+name: Bug report
+description: Report a problem with wolf
 title: "[Bug] "
 body:
   - type: markdown
     attributes:
       value: |
-        感谢反馈！请尽量提供可复现问题的信息。
+        Thanks for your report! Please provide as much information as possible to reproduce the issue.
   - type: textarea
     id: summary
     attributes:
-      label: 问题描述
-      description: 简洁说明遇到的问题。
-      placeholder: 清晰、简洁地描述问题。
+      label: Problem summary
+      description: Briefly describe the problem you encountered.
+      placeholder: Provide a clear, concise description of the problem.
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
-      label: 复现步骤
-      description: 请提供复现问题所需的命令和步骤。
+      label: Steps to reproduce
+      description: Provide the commands and steps needed to reproduce the issue.
       placeholder: |
-        1. 运行 ...
-        2. 使用 ...
-        3. 观察到 ...
+        1. Run ...
+        2. Use ...
+        3. Observe ...
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
-      label: 预期行为
-      description: 说明你原本期望发生什么。
+      label: Expected behavior
+      description: Describe what you expected to happen.
     validations:
       required: true
   - type: textarea
     id: actual
     attributes:
-      label: 实际行为
-      description: 说明实际发生了什么，并附上相关错误信息。
+      label: Actual behavior
+      description: Describe what actually happened and include any relevant error messages.
     validations:
       required: true
   - type: input
     id: wolf-version
     attributes:
-      label: wolf 版本
-      description: 可运行 `wolf --version` 查询。
-      placeholder: 例如 1.3.0
+      label: wolf version
+      description: Run `wolf --version` to check.
+      placeholder: e.g. 1.3.0
   - type: dropdown
     id: operating-system
     attributes:
-      label: 操作系统
+      label: Operating system
       options:
         - Linux
         - macOS
         - Windows
-        - 其他
+        - Other
     validations:
       required: true
   - type: textarea
     id: model
     attributes:
-      label: 模型信息
-      description: 如果问题与模型有关，请提供模型格式、架构及相关信息。
+      label: Model information
+      description: If the issue is model-related, provide the model format, architecture, and any relevant details.
   - type: textarea
     id: logs
     attributes:
-      label: 日志或补充信息
-      description: 请粘贴相关日志；提交前请移除 API 密钥等敏感信息。
+      label: Logs or additional information
+      description: Paste any relevant logs. Remove sensitive information such as API keys before submitting.
       render: shell
