@@ -5,8 +5,11 @@ use crate::options::ChatOptions;
 use crate::serve::openai::{self, *};
 use crate::serve::queue::QueueTicket;
 use std::io::{self, Read};
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use tiny_http::{Header, Method, Request, Response, StatusCode};
+use tokio::sync::mpsc;
+
+const SSE_CHANNEL_CAPACITY: usize = 8;
 
 pub(crate) struct ServerState {
     pub(crate) engine: Arc<Engine>,
@@ -305,7 +308,7 @@ fn handle_chat_completions(
     let created = openai::now_unix();
 
     if api_request.stream {
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(SSE_CHANNEL_CAPACITY);
         let response = sse_response(rx);
         let gen_state = Arc::clone(&state);
         std::thread::spawn(move || {
@@ -529,13 +532,13 @@ impl SseSink {
             serde_json::to_string(&chunk).map_err(|error| format!("SSE 帧序列化失败：{error}"))?;
         let frame = format!("data: {json}\n\n");
         self.tx
-            .send(frame.into_bytes())
+            .blocking_send(frame.into_bytes())
             .map_err(|_| "客户端已断开".to_string())
     }
 
     fn send_done(&self) -> Result<(), String> {
         self.tx
-            .send(b"data: [DONE]\n\n".to_vec())
+            .blocking_send(b"data: [DONE]\n\n".to_vec())
             .map_err(|_| "客户端已断开".to_string())
     }
 }
@@ -584,12 +587,12 @@ impl ChannelReader {
 impl Read for ChannelReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         while self.offset >= self.current.len() {
-            match self.receiver.recv() {
-                Ok(chunk) => {
+            match self.receiver.blocking_recv() {
+                Some(chunk) => {
                     self.current = chunk;
                     self.offset = 0;
                 }
-                Err(_) => return Ok(0),
+                None => return Ok(0),
             }
         }
         let remaining = &self.current[self.offset..];
@@ -648,7 +651,7 @@ mod tests {
 
     #[test]
     fn channel_reader_eof_on_disconnect() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel(1);
         let mut reader = ChannelReader::new(rx);
         let mut buf = [0u8; 16];
         // dropping tx → EOF
@@ -659,13 +662,39 @@ mod tests {
 
     #[test]
     fn channel_reader_pumps_chunks() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel(1);
         let mut reader = ChannelReader::new(rx);
         let mut buf = [0u8; 4];
-        tx.send(b"hello".to_vec()).unwrap();
+        tx.blocking_send(b"hello".to_vec()).unwrap();
         let n = reader.read(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"hell");
         let n = reader.read(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"o");
+    }
+
+    #[test]
+    fn dropping_reader_unblocks_sse_sink() {
+        let (tx, rx) = mpsc::channel(1);
+        tx.blocking_send(b"queued".to_vec()).unwrap();
+        let reader = ChannelReader::new(rx);
+        let mut sink = SseSink {
+            tx,
+            id: "test".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            first: true,
+        };
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let sender = std::thread::spawn(move || {
+            done_tx.send(sink.push("token").is_err()).unwrap();
+        });
+
+        drop(reader);
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap()
+        );
+        sender.join().unwrap();
     }
 }
