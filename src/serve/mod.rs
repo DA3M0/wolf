@@ -2,13 +2,14 @@
 
 mod http;
 mod openai;
+mod queue;
 
 use crate::chat::{self, Engine};
 use crate::cli::ServeOptions;
 use crate::options::ChatOptions;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -65,7 +66,7 @@ pub fn serve(options: ServeOptions, chat_options: ChatOptions) -> Result<(), Str
         default_options: chat_options,
         model_id,
         api_key,
-        generation_lock: Mutex::new(()),
+        generation_queue: Arc::new(queue::FifoQueue::new(options.max_concurrent_generations)?),
         created,
     });
 
@@ -76,7 +77,9 @@ pub fn serve(options: ServeOptions, chat_options: ChatOptions) -> Result<(), Str
         match server.recv_timeout(Duration::from_millis(200)) {
             Ok(Some(request)) => {
                 let state = Arc::clone(&state);
-                std::thread::spawn(move || http::handle(state, request));
+                let ticket = http::is_generation_request(&request)
+                    .then(|| Arc::clone(&state.generation_queue).enqueue());
+                std::thread::spawn(move || http::handle(state, request, ticket));
             }
             Ok(None) => {}
             Err(error) => {

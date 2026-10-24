@@ -27,6 +27,8 @@ pub struct ServeOptions {
     pub host: String,
     /// 0 表示由系统分配空闲端口。
     pub port: u16,
+    /// 同时执行模型推理的生成请求上限。
+    pub max_concurrent_generations: usize,
     pub generate_key: bool,
     pub api_key: Option<String>,
 }
@@ -38,6 +40,7 @@ impl Default for ServeOptions {
             model_dir: PathBuf::from("."),
             host: "127.0.0.1".to_string(),
             port: 8080,
+            max_concurrent_generations: 1,
             generate_key: false,
             api_key: None,
         }
@@ -220,6 +223,7 @@ pub fn parse_context_args(
 pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), RunError> {
     let mut serve = ServeOptions::default();
     let mut options = DEFAULT_CHAT_OPTIONS;
+    let mut max_concurrent_generations_specified = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -266,6 +270,17 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
                 serve.port = value.parse::<u16>().map_err(|_| {
                     RunError::usage(format!("--port 需要 0-65535 之间的端口，收到“{value}”。"))
                 })?;
+            }
+            "--max-concurrent-generations" => {
+                if max_concurrent_generations_specified {
+                    return Err(RunError::usage(
+                        "--max-concurrent-generations 只能指定一次。",
+                    ));
+                }
+                index += 1;
+                serve.max_concurrent_generations =
+                    parse_positive_option(args, index, "--max-concurrent-generations")?;
+                max_concurrent_generations_specified = true;
             }
             "--generate-key" => {
                 if serve.generate_key {
@@ -620,6 +635,7 @@ mod tests {
         assert_eq!(serve.model_dir, PathBuf::from("."));
         assert_eq!(serve.host, "127.0.0.1");
         assert_eq!(serve.port, 8080);
+        assert_eq!(serve.max_concurrent_generations, 1);
         assert!(!serve.generate_key);
         assert_eq!(serve.api_key, None);
         assert_eq!(options, DEFAULT_CHAT_OPTIONS);
@@ -636,6 +652,8 @@ mod tests {
             "0.0.0.0",
             "--port",
             "9000",
+            "--max-concurrent-generations",
+            "3",
             "--api-key",
             "wolf-secret",
             "--temperature",
@@ -647,6 +665,7 @@ mod tests {
         assert_eq!(serve.model_dir, PathBuf::from("./models"));
         assert_eq!(serve.host, "0.0.0.0");
         assert_eq!(serve.port, 9000);
+        assert_eq!(serve.max_concurrent_generations, 3);
         assert_eq!(serve.api_key.as_deref(), Some("wolf-secret"));
         assert!(!serve.generate_key);
         assert_eq!(options.temperature, 0.7);
@@ -706,6 +725,25 @@ mod tests {
         assert_eq!(serve.model_dir, PathBuf::from("./models"));
         assert_eq!(serve.port, 9000);
         assert_eq!(options, DEFAULT_CHAT_OPTIONS);
+    }
+
+    #[test]
+    fn serve_rejects_invalid_or_repeated_generation_limit() {
+        for values in [
+            args(&["m.gguf", "--max-concurrent-generations", "0"]),
+            args(&[
+                "m.gguf",
+                "--max-concurrent-generations",
+                "2",
+                "--max-concurrent-generations",
+                "3",
+            ]),
+        ] {
+            assert!(matches!(
+                parse_serve_args(&values).unwrap_err(),
+                RunError::Usage(_)
+            ));
+        }
     }
 
     #[test]

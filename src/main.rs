@@ -158,6 +158,7 @@ fn print_help() {
   --model-dir <目录>    按名称搜索模型的目录（默认 .）\n\
   --host <地址>         监听地址（默认 127.0.0.1）\n\
   --port <端口>         监听端口（默认 8080，0 为系统分配）\n\
+  --max-concurrent-generations <N> 同时推理的请求上限（默认 1）\n\
   --generate-key        自动生成 API Key 并打印\n\
   --api-key <KEY>       指定 API Key\n\
   【以上选项可与对话选项共用，设置服务默认采样参数】\n\

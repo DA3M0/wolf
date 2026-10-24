@@ -3,8 +3,9 @@
 use crate::chat::{ChatMessage, Engine, Generation, TextSink};
 use crate::options::ChatOptions;
 use crate::serve::openai::{self, *};
+use crate::serve::queue::QueueTicket;
 use std::io::{self, Read};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
 pub(crate) struct ServerState {
@@ -12,11 +13,25 @@ pub(crate) struct ServerState {
     pub(crate) default_options: ChatOptions,
     pub(crate) model_id: String,
     pub(crate) api_key: Option<String>,
-    pub(crate) generation_lock: Mutex<()>,
+    pub(crate) generation_queue: Arc<super::queue::FifoQueue>,
     pub(crate) created: u64,
 }
 
-pub(crate) fn handle(state: Arc<ServerState>, request: Request) {
+pub(crate) fn is_generation_request(request: &Request) -> bool {
+    if request.method() != &Method::Post {
+        return false;
+    }
+    let raw = request.url();
+    let path = raw.split('?').next().unwrap_or(raw);
+    let path = path.strip_suffix('/').unwrap_or(path);
+    matches!(path, "/v1/chat/completions" | "/v1/completions")
+}
+
+pub(crate) fn handle(
+    state: Arc<ServerState>,
+    request: Request,
+    generation_ticket: Option<QueueTicket>,
+) {
     if request.method() == &Method::Options {
         let _ = request.respond(options_response());
         return;
@@ -61,8 +76,16 @@ pub(crate) fn handle(state: Arc<ServerState>, request: Request) {
                 );
             }
         }
-        Ok(RouteEnum::ChatCompletions) => handle_chat_completions(state, request),
-        Ok(RouteEnum::Completions) => handle_completions(state, request),
+        Ok(RouteEnum::ChatCompletions) => handle_chat_completions(
+            state,
+            request,
+            generation_ticket.expect("generation request receives a queue ticket"),
+        ),
+        Ok(RouteEnum::Completions) => handle_completions(
+            state,
+            request,
+            generation_ticket.expect("generation request receives a queue ticket"),
+        ),
         Err(status) => respond_error(
             request,
             status.0,
@@ -230,7 +253,11 @@ fn read_body(request: &mut Request) -> io::Result<Vec<u8>> {
 
 // ---- chat completions ----
 
-fn handle_chat_completions(state: Arc<ServerState>, request: Request) {
+fn handle_chat_completions(
+    state: Arc<ServerState>,
+    request: Request,
+    generation_ticket: QueueTicket,
+) {
     let mut request = request;
     let body = match read_body(&mut request) {
         Ok(body) => body,
@@ -291,6 +318,7 @@ fn handle_chat_completions(state: Arc<ServerState>, request: Request) {
             };
             let result = generate_chat(
                 &gen_state,
+                generation_ticket,
                 system,
                 prepared.messages,
                 &options,
@@ -318,6 +346,7 @@ fn handle_chat_completions(state: Arc<ServerState>, request: Request) {
         let mut sink = NullSink;
         match generate_chat(
             &state,
+            generation_ticket,
             system,
             prepared.messages,
             &options,
@@ -352,7 +381,7 @@ fn handle_chat_completions(state: Arc<ServerState>, request: Request) {
 
 // ---- completions (legacy) ----
 
-fn handle_completions(state: Arc<ServerState>, request: Request) {
+fn handle_completions(state: Arc<ServerState>, request: Request, generation_ticket: QueueTicket) {
     let mut request = request;
     let body = match read_body(&mut request) {
         Ok(body) => body,
@@ -406,7 +435,15 @@ fn handle_completions(state: Arc<ServerState>, request: Request) {
     let created = openai::now_unix();
 
     let mut sink = NullSink;
-    match generate_chat(&state, system, vec![message], &options, &stop, &mut sink) {
+    match generate_chat(
+        &state,
+        generation_ticket,
+        system,
+        vec![message],
+        &options,
+        &stop,
+        &mut sink,
+    ) {
         Ok(generation) => {
             let body = serde_json::to_string(&TextCompletionResponse {
                 id: completion_id,
@@ -433,16 +470,14 @@ fn handle_completions(state: Arc<ServerState>, request: Request) {
 
 fn generate_chat(
     state: &ServerState,
+    ticket: QueueTicket,
     system: Option<String>,
     mut messages: Vec<ChatMessage>,
     options: &ChatOptions,
     stop: &[String],
     sink: &mut dyn TextSink,
 ) -> Result<Generation, String> {
-    let _guard = state
-        .generation_lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = ticket.acquire();
     let mut context = state.engine.new_context()?;
     let (tokens, _dropped) =
         state

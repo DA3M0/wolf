@@ -195,10 +195,13 @@ Ctrl-C 停止服务。
 | `--model-dir <目录>` | `.` | 按名称搜索模型的目录 |
 | `--host <地址>` | `127.0.0.1` | 监听地址 |
 | `--port <端口>` | `8080` | 监听端口（`0` = 系统分配） |
+| `--max-concurrent-generations <N>` | `1` | 同时执行模型推理的请求上限 |
 | `--generate-key` | 关闭 | 自动生成 API Key 并打印 |
 | `--api-key <KEY>` | 无 | 指定 API Key（与 `--generate-key` 互斥） |
 
 服务选项可与对话选项（`--threads`、`--max-tokens`、`--temperature`、`--top-p`、`--top-k`、`--repeat-penalty`、`--seed`、`--system`）共用，用于设置服务的默认采样参数。请求中的同名字段会覆盖这些默认值。
+
+生成请求按 HTTP 服务接收顺序进入队列，最多同时执行 `--max-concurrent-generations` 次模型推理；默认值 `1` 保持串行行为。增大上限可提高吞吐量，但会增加内存和计算资源占用。无效请求在校验阶段取消其队列位置，不会阻塞后续请求。
 
 模型名或路径建议直接作为 `wolf serve` 后的第一个参数；已有脚本仍可使用 `--model <名称或路径>`。
 
