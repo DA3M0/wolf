@@ -1094,15 +1094,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio"
-version = "1.54.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
-dependencies = [
- "pin-project-lite",
-]
-
-[[package]]
 name = "toml_datetime"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1439,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "wolf"
-version = "1.4.4"
+version = "1.4.5"
 dependencies = [
  "cc",
  "ctrlc",
@@ -1450,7 +1441,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tiny_http",
- "tokio",
 ]
 
 [[package]]

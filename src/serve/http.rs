@@ -6,10 +6,12 @@ use crate::serve::openai::{self, *};
 use crate::serve::queue::QueueTicket;
 use std::io::{self, Read};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::time::Duration;
 use tiny_http::{Header, Method, Request, Response, StatusCode};
-use tokio::sync::mpsc;
 
 const SSE_CHANNEL_CAPACITY: usize = 8;
+const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(4);
 
 pub(crate) struct ServerState {
     pub(crate) engine: Arc<Engine>,
@@ -308,8 +310,22 @@ fn handle_chat_completions(
     let created = openai::now_unix();
 
     if api_request.stream {
-        let (tx, rx) = mpsc::channel::<Vec<u8>>(SSE_CHANNEL_CAPACITY);
-        let response = sse_response(rx);
+        let heartbeat_frame = match sse_frame(
+            &completion_id,
+            created,
+            &model,
+            None,
+            Some(String::new()),
+            None,
+        ) {
+            Ok(frame) => frame,
+            Err(error) => {
+                respond_error(request, 500, &error);
+                return;
+            }
+        };
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(SSE_CHANNEL_CAPACITY);
+        let response = sse_response(rx, heartbeat_frame);
         let gen_state = Arc::clone(&state);
         std::thread::spawn(move || {
             let mut sink = SseSink {
@@ -503,7 +519,7 @@ impl TextSink for NullSink {
 
 /// 流式 SSE 输出目标:把每段文本封装成 OpenAI 格式的 `data:` 帧。
 struct SseSink {
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: SyncSender<Vec<u8>>,
     id: String,
     created: u64,
     model: String,
@@ -517,34 +533,54 @@ impl SseSink {
         content: Option<String>,
         finish_reason: Option<String>,
     ) -> Result<(), String> {
-        let chunk = ChatCompletionChunk {
-            id: self.id.clone(),
-            object: "chat.completion.chunk",
-            created: self.created,
-            model: self.model.clone(),
-            choices: vec![ChunkChoice {
-                index: 0,
-                delta: ChunkDelta { role, content },
-                finish_reason,
-            }],
-        };
-        let json =
-            serde_json::to_string(&chunk).map_err(|error| format!("SSE 帧序列化失败：{error}"))?;
-        let frame = format!("data: {json}\n\n");
         self.tx
-            .blocking_send(frame.into_bytes())
+            .send(sse_frame(
+                &self.id,
+                self.created,
+                &self.model,
+                role,
+                content,
+                finish_reason,
+            )?)
             .map_err(|_| "客户端已断开".to_string())
     }
 
     fn send_done(&self) -> Result<(), String> {
         self.tx
-            .blocking_send(b"data: [DONE]\n\n".to_vec())
+            .send(b"data: [DONE]\n\n".to_vec())
             .map_err(|_| "客户端已断开".to_string())
     }
 }
 
+fn sse_frame(
+    id: &str,
+    created: u64,
+    model: &str,
+    role: Option<&'static str>,
+    content: Option<String>,
+    finish_reason: Option<String>,
+) -> Result<Vec<u8>, String> {
+    let chunk = ChatCompletionChunk {
+        id: id.to_string(),
+        object: "chat.completion.chunk",
+        created,
+        model: model.to_string(),
+        choices: vec![ChunkChoice {
+            index: 0,
+            delta: ChunkDelta { role, content },
+            finish_reason,
+        }],
+    };
+    let json =
+        serde_json::to_string(&chunk).map_err(|error| format!("SSE 帧序列化失败：{error}"))?;
+    Ok(format!("data: {json}\n\n").into_bytes())
+}
+
 impl TextSink for SseSink {
     fn push(&mut self, text: &str) -> Result<(), String> {
+        if text.is_empty() {
+            return Ok(());
+        }
         let role = self.first.then_some("assistant");
         self.first = false;
         let content = Some(text.to_string());
@@ -554,7 +590,7 @@ impl TextSink for SseSink {
 
 // ---- SSE reader ----
 
-fn sse_response(receiver: mpsc::Receiver<Vec<u8>>) -> Response<ChannelReader> {
+fn sse_response(receiver: Receiver<Vec<u8>>, heartbeat_frame: Vec<u8>) -> Response<ChannelReader> {
     let mut headers = cors_headers();
     headers
         .push(Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..]).expect("ssect"));
@@ -562,22 +598,32 @@ fn sse_response(receiver: mpsc::Receiver<Vec<u8>>) -> Response<ChannelReader> {
     Response::new(
         StatusCode(200),
         headers,
-        ChannelReader::new(receiver),
+        ChannelReader::new(receiver, heartbeat_frame, SSE_HEARTBEAT_INTERVAL),
         None,
         None,
     )
 }
 
 struct ChannelReader {
-    receiver: mpsc::Receiver<Vec<u8>>,
+    receiver: Receiver<Vec<u8>>,
+    heartbeat_frame: Vec<u8>,
+    heartbeat_interval: Duration,
+    waiting_for_first_chunk: bool,
     current: Vec<u8>,
     offset: usize,
 }
 
 impl ChannelReader {
-    fn new(receiver: mpsc::Receiver<Vec<u8>>) -> Self {
+    fn new(
+        receiver: Receiver<Vec<u8>>,
+        heartbeat_frame: Vec<u8>,
+        heartbeat_interval: Duration,
+    ) -> Self {
         Self {
             receiver,
+            heartbeat_frame,
+            heartbeat_interval,
+            waiting_for_first_chunk: true,
             current: Vec::new(),
             offset: 0,
         }
@@ -586,14 +632,28 @@ impl ChannelReader {
 
 impl Read for ChannelReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         while self.offset >= self.current.len() {
-            match self.receiver.blocking_recv() {
-                Some(chunk) => {
-                    self.current = chunk;
-                    self.offset = 0;
+            if self.waiting_for_first_chunk {
+                match self.receiver.recv_timeout(self.heartbeat_interval) {
+                    Ok(chunk) => {
+                        self.waiting_for_first_chunk = false;
+                        self.current = chunk;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        self.current = self.heartbeat_frame.clone();
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return Ok(0),
                 }
-                None => return Ok(0),
+            } else {
+                match self.receiver.recv() {
+                    Ok(chunk) => self.current = chunk,
+                    Err(_) => return Ok(0),
+                }
             }
+            self.offset = 0;
         }
         let remaining = &self.current[self.offset..];
         let n = remaining.len().min(buf.len());
@@ -651,8 +711,8 @@ mod tests {
 
     #[test]
     fn channel_reader_eof_on_disconnect() {
-        let (tx, rx) = mpsc::channel(1);
-        let mut reader = ChannelReader::new(rx);
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut reader = ChannelReader::new(rx, b"heartbeat".to_vec(), Duration::from_secs(1));
         let mut buf = [0u8; 16];
         // dropping tx → EOF
         drop(tx);
@@ -662,10 +722,10 @@ mod tests {
 
     #[test]
     fn channel_reader_pumps_chunks() {
-        let (tx, rx) = mpsc::channel(1);
-        let mut reader = ChannelReader::new(rx);
+        let (tx, rx) = mpsc::sync_channel(1);
+        let mut reader = ChannelReader::new(rx, b"heartbeat".to_vec(), Duration::from_secs(1));
         let mut buf = [0u8; 4];
-        tx.blocking_send(b"hello".to_vec()).unwrap();
+        tx.send(b"hello".to_vec()).unwrap();
         let n = reader.read(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"hell");
         let n = reader.read(&mut buf).unwrap();
@@ -674,9 +734,9 @@ mod tests {
 
     #[test]
     fn dropping_reader_unblocks_sse_sink() {
-        let (tx, rx) = mpsc::channel(1);
-        tx.blocking_send(b"queued".to_vec()).unwrap();
-        let reader = ChannelReader::new(rx);
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(b"queued".to_vec()).unwrap();
+        let reader = ChannelReader::new(rx, b"heartbeat".to_vec(), Duration::from_secs(1));
         let mut sink = SseSink {
             tx,
             id: "test".to_string(),
@@ -696,5 +756,54 @@ mod tests {
                 .unwrap()
         );
         sender.join().unwrap();
+    }
+
+    #[test]
+    fn channel_reader_sends_heartbeat_until_first_chunk() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let heartbeat = sse_frame("test", 1, "test", None, Some(String::new()), None).unwrap();
+        let mut reader = ChannelReader::new(rx, heartbeat.clone(), Duration::from_millis(10));
+        let mut buf = [0u8; 512];
+
+        let n = reader.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], heartbeat);
+        assert!(heartbeat.starts_with(b"data: "));
+        assert!(heartbeat.ends_with(b"\n\n"));
+        let payload = std::str::from_utf8(&heartbeat[6..heartbeat.len() - 2]).unwrap();
+        let chunk: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(chunk["choices"][0]["delta"]["content"], "");
+
+        tx.send(b"data: token\n\n".to_vec()).unwrap();
+        let n = reader.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"data: token\n\n");
+        drop(tx);
+        assert_eq!(reader.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn sse_sink_ignores_empty_generated_chunks() {
+        let (tx, rx) = mpsc::sync_channel(2);
+        let mut sink = SseSink {
+            tx,
+            id: "test".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            first: true,
+        };
+
+        sink.push("").unwrap();
+        assert!(matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        sink.push("token").unwrap();
+        let chunk: serde_json::Value = serde_json::from_slice(
+            &rx.try_recv()
+                .unwrap()
+                .strip_prefix(b"data: ")
+                .unwrap()
+                .strip_suffix(b"\n\n")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(chunk["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(chunk["choices"][0]["delta"]["content"], "token");
     }
 }

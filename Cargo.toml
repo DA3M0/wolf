@@ -1,6 +1,6 @@
 [package]
 name = "wolf"
-version = "1.4.4"
+version = "1.4.5"
 edition = "2024"
 description = "Local LLM chat and model inspection CLI powered by llama.cpp"
 license = "Apache-2.0"
@@ -34,7 +34,6 @@ rayon = "1.12.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.145"
 tiny_http = "0.12"
-tokio = { version = "1", features = ["sync"] }
 
 [build-dependencies]
 cc = "1"
