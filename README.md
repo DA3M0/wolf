@@ -1,6 +1,6 @@
 # wolf
 
-`wolf` is a local Rust command-line tool for chatting with and inspecting GGUF models. GGUF chat inference is provided by llama.cpp (through the `llama-cpp-4` bindings); Safetensors files are supported for structural inspection only, not inference. The simplest way to use wolf is to pass a model file path as its only argument:
+wolf is an ultra-lightweight, OpenAI-compatible local LLM gateway for AI Agents, built in Rust and C. It also provides a powerful CLI for chatting with, inspecting, and managing GGUF models. GGUF chat inference is provided by llama.cpp (through the `llama-cpp-4` bindings); Safetensors files are supported for structural inspection only, not inference. The simplest way to use wolf is to pass a model file path as its only argument:
 
 ```sh
 wolf ./models/llama-3-8b-instruct.Q4_K_M.gguf
@@ -20,20 +20,20 @@ cargo build --release
 
 The executable is generated at `target/release/wolf`. The commands below assume it is on your `PATH`; otherwise, use `./target/release/wolf` instead of `wolf`.
 
-The default build uses the CPU, and prebuilt releases include only the CPU backend. To use a GPU backend, install its toolchain/SDK and build it yourself. Vulkan is the recommended cross-platform GPU backend and can be enabled explicitly with the `vulkan` feature. The build machine needs C/C++ build tools, CMake, and the Vulkan SDK (including Vulkan headers, a loader, and the `glslc` GLSL compiler). For example, on Ubuntu/Debian:
+The default build uses the CPU with OpenMP enabled out-of-the-box. Prebuilt releases include only the CPU backend. To use a GPU backend, install its toolchain/SDK and build it yourself. Vulkan is the recommended cross-platform GPU backend and can be enabled explicitly with the `vulkan` feature. The build machine needs C/C++ build tools, CMake, and the Vulkan SDK (including Vulkan headers, a loader, and the `glslc` GLSL compiler). For example, on Ubuntu/Debian:
 
 ```sh
 sudo apt install build-essential cmake libvulkan-dev glslc
 cargo build --release --features vulkan
 ```
 
-For faster CPU inference on a specific machine, build with the optional `native` feature:
+For maximum CPU performance on a specific machine, build with the optional `native` feature:
 
 ```sh
 cargo build --release --features native
 ```
 
-This enables llama.cpp's CPU auto-tuning (`GGML_NATIVE`), allowing it to use instruction sets supported by the CPU on the build machine (for example, AVX2 on x86-64 or NEON on ARM). SIMD-optimized kernels can improve inference speed, especially for CPU-bound workloads, though the actual gain depends on the model and hardware. Build on the machine that will run the binary: this option tunes for the build host, is not a cross-compilation target selector, and the resulting binary may not run on older CPUs or other machines without the same instruction-set support. Keep the default build for portable binaries and release artifacts. To combine CPU tuning with a GPU backend, enable both features, for example `cargo build --release --features "native,vulkan"`.
+This applies maximum CPU-specific tuning through llama.cpp's auto-tuning (`GGML_NATIVE`), allowing it to use instruction sets supported by the CPU on the build machine (for example, AVX2 on x86-64 or NEON on ARM). SIMD-optimized kernels can improve inference speed, especially for CPU-bound workloads, though the actual gain depends on the model and hardware. Build on the machine that will run the binary: this option tunes for the build host, is not a cross-compilation target selector, and the resulting binary may not run on older CPUs or other machines without the same instruction-set support. Keep the default build for portable binaries and release artifacts. To combine CPU tuning with a GPU backend, enable both features, for example `cargo build --release --features "native,vulkan"`.
 
 On Windows, install the [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home) and ensure the MSVC C++ build tools are available. On macOS, you can use the Metal feature; to use Vulkan, install the LunarG Vulkan SDK/MoltenVK and set `VULKAN_SDK`. If the Vulkan SDK is unavailable when building on macOS, the underlying dependency falls back to Metal. On other Linux distributions, install the corresponding Vulkan development packages and `glslc`.
 
@@ -217,7 +217,7 @@ Press `Ctrl-C` to stop the service.
 
 Service options can be combined with chat options (`--threads`, `--max-tokens`, `--temperature`, `--top-p`, `--top-k`, `--repeat-penalty`, `--seed`, `--system`) to set default sampling parameters for the service. Matching fields in a request override these defaults.
 
-Generation requests are queued in the order they are received by the HTTP service. At most `--max-concurrent-generations` model inference requests run at once; the default value of `1` keeps requests serial. Increasing this limit may improve throughput but uses more memory and compute resources. Invalid requests are removed from the queue during validation and do not block subsequent requests.
+Generation requests are queued in the order they are received by the HTTP service. At most `--max-concurrent-generations` model inference requests run at once; the default value of `1` keeps requests serial. Increasing this limit may improve throughput but uses more memory and compute resources. **Warning:** each concurrent generation can significantly increase memory usage and cause memory pressure or out-of-memory failures, especially with large models or long contexts. Invalid requests are removed from the queue during validation and do not block subsequent requests.
 
 It is recommended to pass the model name or path as the first argument after `wolf serve`; existing scripts can still use `--model <name-or-path>`.
 
