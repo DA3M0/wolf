@@ -8,6 +8,7 @@ pub const DEFAULT_CONTEXT_TOKENS: usize = 4096;
 pub const DEFAULT_TEMPERATURE: f64 = 0.0;
 pub const DEFAULT_TOP_P: f64 = 0.9;
 pub const DEFAULT_REPEAT_PENALTY: f32 = 1.0;
+pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a concise assistant. Respond in English.";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatOptions {
@@ -29,7 +30,10 @@ pub struct ChatOptions {
 
 impl Default for ChatOptions {
     fn default() -> Self {
-        DEFAULT_CHAT_OPTIONS
+        Self {
+            system: Some(DEFAULT_SYSTEM_PROMPT.to_string()),
+            ..DEFAULT_CHAT_OPTIONS
+        }
     }
 }
 
