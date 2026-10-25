@@ -264,13 +264,38 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+#### Function calling
+
+`/v1/chat/completions` accepts OpenAI-style function tools and `tool_choice` values (`auto`, `none`, `required`, or a named function). It returns standard `message.tool_calls` for non-streaming requests and `tool_calls` deltas for SSE requests. Tool-enabled streams buffer the model output for classification while continuing to send SSE heartbeats; requests without tools retain the existing token-by-token stream. The calling application is responsible for executing the function and sending the assistant `tool_calls` plus `role: "tool"` result message in the next request. Function support and call formatting depend on the loaded model's llama.cpp chat template; if the output is not recognized as a valid declared tool call, wolf returns it as assistant text.
+
+```python
+response = client.chat.completions.create(
+    model="qwen2.5-0.5b",
+    messages=[{"role": "user", "content": "What is the weather in Tokyo?"}],
+    tools=[{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }],
+    tool_choice="auto",
+)
+print(response.choices[0].message.tool_calls)
+```
+
 #### Supported request fields
 
-`POST /v1/chat/completions` supports: `model`, `messages` (`content` can be a string or an array of text), `stream`, `temperature`, `top_p`, `top_k`, `max_tokens` / `max_completion_tokens`, `stop` (a string or array), `seed`, and `n` (only `1`). Supported roles are `system` / `developer` (mapped to `system`) / `user` / `assistant`.
+`POST /v1/chat/completions` supports: `model`, `messages` (`content` can be a string or an array of text), `stream`, `temperature`, `top_p`, `top_k`, `max_tokens` / `max_completion_tokens`, `stop` (a string or array), `seed`, `n` (only `1`), `tools`, and `tool_choice`. Supported roles are `system` / `developer` (mapped to `system`) / `user` / `assistant` / `tool`.
 
 The `model` field is optional. If provided, it must match the ID of the loaded model (the `id` returned by `/v1/models`, which defaults to the filename without `.gguf`); otherwise, the service returns 404. The service loads one model at a time, and concurrent requests are processed serially in arrival order.
 
-**Tool/function calling is not supported** (`tools`, `tool_calls`): the engine does not support grammar or tools. Hot-loading multiple models, `/v1/embeddings`, `/v1/audio`, and `/v1/images` are also unsupported.
+Hot-loading multiple models, `/v1/embeddings`, `/v1/audio`, and `/v1/images` are unsupported.
 
 ## Supported formats and limitations
 

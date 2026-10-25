@@ -84,6 +84,7 @@ pub struct Generation {
 /// 共享;但 `LlamaContext` 不是 `Send`,必须由各线程自行创建并独占使用。
 pub struct Engine {
     /// 字段顺序即析构顺序:模型必须先于 backend 释放。
+    templates: std::result::Result<ChatTemplates, String>,
     model: LlamaModel,
     backend: LlamaBackend,
     stop_markers: Vec<String>,
@@ -103,8 +104,11 @@ impl Engine {
             .map_err(|_| "上下文长度超出 llama.cpp 支持范围。".to_string())?;
         let context_size = default_context_size.min(model.n_ctx_train()).max(1);
         let stop_markers = detect_stop_markers(&model)?;
+        let templates = ChatTemplates::from_model(&model, None)
+            .map_err(|error| format!("无法初始化模型对话模板：{error}"));
         Ok(Self {
             model,
+            templates,
             backend,
             stop_markers,
             context_size,
@@ -147,6 +151,7 @@ impl Engine {
                         .map_err(|error| format!("无法创建系统消息：{error}"))?,
                 );
             }
+
             for message in messages.iter() {
                 prompt_messages.push(message.to_llama()?);
             }
@@ -172,6 +177,94 @@ impl Engine {
         }
     }
 
+    /// Render an OpenAI tool request using llama.cpp's model-aware chat parser.
+    pub fn prepare_tool_chat(
+        &self,
+        messages_json: &str,
+        tools_json: &str,
+        tool_choice: ToolChoice,
+        max_tokens: usize,
+    ) -> std::result::Result<(Vec<LlamaToken>, ChatParams), String> {
+        let templates = match &self.templates {
+            Ok(templates) => templates,
+            Err(error) => return Err(error.clone()),
+        };
+        let mut messages: Vec<serde_json::Value> = serde_json::from_str(messages_json)
+            .map_err(|error| format!("无法解析工具请求消息：{error}"))?;
+        let limit = usize::try_from(self.context_size)
+            .map_err(|_| "模型上下文长度超出当前平台支持范围。".to_string())?;
+        loop {
+            let messages_json = serde_json::to_string(&messages)
+                .map_err(|error| format!("无法编码工具请求消息：{error}"))?;
+            let applied =
+                Self::apply_tool_chat(templates, &messages_json, tools_json, tool_choice)?;
+            let tokens = self
+                .model
+                .str_to_token(&applied.prompt, AddBos::Always)
+                .map_err(|error| format!("无法编码含工具的输入文本：{error}"))?;
+            if tokens.len().saturating_add(max_tokens) <= limit {
+                return Ok((tokens, applied));
+            }
+            if !drop_oldest_tool_turn(&mut messages) {
+                return Err(format!(
+                    "输入加生成预留超过模型上下文上限 {limit} tokens，请缩短对话或减少 --max-tokens。"
+                ));
+            }
+            eprintln!("上下文接近上限：已截断较早的对话轮次。");
+        }
+    }
+
+    fn apply_tool_chat(
+        templates: &ChatTemplates,
+        messages_json: &str,
+        tools_json: &str,
+        tool_choice: ToolChoice,
+    ) -> std::result::Result<ChatParams, String> {
+        if let Ok(params) = templates.apply(
+            &ChatApplyParams::new(messages_json)
+                .with_tools(tools_json)
+                .with_tool_choice(tool_choice),
+        ) && !params.grammar.is_empty()
+        {
+            return Ok(params);
+        }
+        let messages = Self::tool_prompt_fallback(messages_json, tools_json, tool_choice)?;
+        templates
+            .apply(&ChatApplyParams::new(messages))
+            .map_err(|error| format!("无法渲染工具调用提示词：{error}"))
+    }
+
+    fn tool_prompt_fallback(
+        messages_json: &str,
+        tools_json: &str,
+        choice: ToolChoice,
+    ) -> std::result::Result<String, String> {
+        let instruction = match choice {
+            ToolChoice::None => format!(
+                "Do not call any function. Respond only as a JSON object of this form: \
+                 {{\"content\":\"your response\"}}. Available function definitions (do not call them): {tools_json}"
+            ),
+            ToolChoice::Required => format!(
+                "Call one of the available functions. Respond only as a JSON object of this form: \
+                 {{\"tool_calls\":[{{\"name\":\"function_name\",\"arguments\":{{}}}}]}}. \
+                 Use valid JSON arguments matching the function schema. Functions: {tools_json}"
+            ),
+            ToolChoice::Auto => format!(
+                "If a function is needed, respond only as a JSON object of this form: \
+                 {{\"tool_calls\":[{{\"name\":\"function_name\",\"arguments\":{{}}}}]}}. \
+                 Otherwise respond only as {{\"content\":\"your response\"}}. \
+                 Use valid JSON arguments matching the function schema. Functions: {tools_json}"
+            ),
+        };
+        let mut messages: Vec<serde_json::Value> = serde_json::from_str(messages_json)
+            .map_err(|error| format!("无法解析工具提示词消息：{error}"))?;
+        messages.insert(
+            0,
+            serde_json::json!({"role": "system", "content": instruction}),
+        );
+        serde_json::to_string(&messages).map_err(|error| format!("无法编码工具提示词消息：{error}"))
+    }
+
     /// 执行一次生成,把可见文本交给 `sink`。
     pub fn generate(
         &self,
@@ -180,6 +273,38 @@ impl Engine {
         options: &ChatOptions,
         extra_stop: &[String],
         sink: &mut dyn TextSink,
+    ) -> std::result::Result<Generation, String> {
+        self.generate_inner(context, prompt, options, extra_stop, sink, None)
+    }
+
+    /// Generate from a template-rendered request and constrain it with its grammar.
+    pub fn generate_with_chat_params(
+        &self,
+        context: &mut LlamaContext<'_>,
+        prompt: &[LlamaToken],
+        options: &ChatOptions,
+        extra_stop: &[String],
+        sink: &mut dyn TextSink,
+        chat_params: &ChatParams,
+    ) -> std::result::Result<Generation, String> {
+        self.generate_inner(
+            context,
+            prompt,
+            options,
+            extra_stop,
+            sink,
+            Some(chat_params),
+        )
+    }
+
+    fn generate_inner(
+        &self,
+        context: &mut LlamaContext<'_>,
+        prompt: &[LlamaToken],
+        options: &ChatOptions,
+        extra_stop: &[String],
+        sink: &mut dyn TextSink,
+        chat_params: Option<&ChatParams>,
     ) -> std::result::Result<Generation, String> {
         if prompt.is_empty() {
             return Err("输入未能转换为模型 token，请重试。".into());
@@ -202,9 +327,11 @@ impl Engine {
                 .decode(&mut batch)
                 .map_err(|error| format!("模型推理失败：{error}"))?;
         }
-        let mut sampler = make_sampler(&self.model, options)?;
-        for token in prompt.iter().copied() {
-            sampler.accept(token);
+        let mut sampler = make_sampler(&self.model, options, chat_params)?;
+        if !chat_params.is_some_and(|params| !params.grammar.is_empty()) {
+            for token in prompt.iter().copied() {
+                sampler.accept(token);
+            }
         }
         let mut stop_markers = self.stop_markers.clone();
         stop_markers.extend(extra_stop.iter().cloned());
@@ -289,6 +416,21 @@ impl Engine {
             finish_reason,
         })
     }
+}
+
+fn drop_oldest_tool_turn(messages: &mut Vec<serde_json::Value>) -> bool {
+    let Some(start) = messages.iter().position(|message| {
+        message.get("role").and_then(serde_json::Value::as_str) == Some("user")
+    }) else {
+        return false;
+    };
+    let Some(next_user) = messages.iter().skip(start + 1).position(|message| {
+        message.get("role").and_then(serde_json::Value::as_str) == Some("user")
+    }) else {
+        return false;
+    };
+    messages.drain(start..start + 1 + next_user);
+    true
 }
 
 pub fn chat(
@@ -549,7 +691,12 @@ impl StopSequence {
 fn make_sampler(
     model: &LlamaModel,
     options: &ChatOptions,
+    chat_params: Option<&ChatParams>,
 ) -> std::result::Result<LlamaSampler, String> {
+    let grammar = match chat_params {
+        Some(params) => make_grammar_sampler(model, params)?,
+        None => None,
+    };
     if options.temperature < 1e-7 {
         let mut samplers = Vec::new();
         if options.repeat_penalty > 1.0 {
@@ -558,6 +705,9 @@ fn make_sampler(
                 64,
                 options.repeat_penalty,
             ));
+        }
+        if let Some(grammar) = grammar {
+            samplers.push(grammar);
         }
         samplers.push(LlamaSampler::greedy());
         return Ok(LlamaSampler::chain_simple(samplers));
@@ -571,6 +721,9 @@ fn make_sampler(
             options.repeat_penalty,
         ));
     }
+    if let Some(grammar) = grammar {
+        samplers.push(grammar);
+    }
     if options.top_k > 0 {
         let top_k = i32::try_from(options.top_k)
             .map_err(|_| "--top-k 超出 llama.cpp 支持范围。".to_string())?;
@@ -583,6 +736,45 @@ fn make_sampler(
         .map_err(|_| "随机种子超出 llama.cpp 支持范围。".to_string())?;
     samplers.push(LlamaSampler::dist(seed));
     Ok(LlamaSampler::chain_simple(samplers))
+}
+
+fn make_grammar_sampler(
+    model: &LlamaModel,
+    params: &ChatParams,
+) -> std::result::Result<Option<LlamaSampler>, String> {
+    if params.grammar.is_empty() {
+        return Ok(None);
+    }
+    let (patterns, tokens) = params.sampler_triggers();
+    let lazy = params.grammar_lazy && !(patterns.is_empty() && tokens.is_empty());
+    let mut sampler = if lazy {
+        let patterns = patterns.iter().map(String::as_str).collect::<Vec<_>>();
+        LlamaSampler::try_grammar_lazy_patterns(model, &params.grammar, "root", &patterns, &tokens)
+            .map_err(|error| format!("无法初始化工具调用语法约束：{error}"))?
+    } else {
+        LlamaSampler::try_grammar(model, &params.grammar, "root")
+            .map_err(|error| format!("无法初始化工具调用语法约束：{error}"))?
+    };
+
+    if !lazy {
+        let generation_prompt = params.generation_prompt();
+        let tokens = model
+            .str_to_token(generation_prompt, AddBos::Never)
+            .map_err(|error| format!("无法编码对话模板生成前缀：{error}"))?;
+        let starts_with_space = generation_prompt.starts_with(char::is_whitespace);
+        for (index, token) in tokens.into_iter().enumerate() {
+            if index == 0 && !starts_with_space {
+                let piece = model
+                    .token_to_str(token, Special::Tokenize)
+                    .map_err(|error| format!("无法读取生成前缀 token：{error}"))?;
+                if piece.starts_with(char::is_whitespace) {
+                    continue;
+                }
+            }
+            sampler.accept(token);
+        }
+    }
+    Ok(Some(sampler))
 }
 
 fn random_seed() -> u64 {
@@ -607,6 +799,40 @@ mod tests {
         let end_of_turn = LlamaToken::new(42);
         let eog = LlamaToken::new(43);
         assert!(is_stop_token(eog, end_of_turn, true));
+    }
+
+    #[test]
+    fn tool_prompt_fallback_includes_json_contract_and_tools() {
+        let messages = r#"[{"role":"user","content":"weather"}]"#;
+        let tools = r#"[{"type":"function","function":{"name":"weather"}}]"#;
+        let prompt = Engine::tool_prompt_fallback(messages, tools, ToolChoice::Auto).unwrap();
+        let messages: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains(r#"{"tool_calls""#)
+        );
+        assert_eq!(messages[1]["content"], "weather");
+    }
+
+    #[test]
+    fn truncates_complete_tool_turns_without_dropping_system_or_latest_user() {
+        let mut messages: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[
+                {"role":"system","content":"system"},
+                {"role":"user","content":"old question"},
+                {"role":"assistant","tool_calls":[{"id":"call_1"}]},
+                {"role":"tool","tool_call_id":"call_1","content":"result"},
+                {"role":"user","content":"latest question"}
+            ]"#,
+        )
+        .unwrap();
+        assert!(drop_oldest_tool_turn(&mut messages));
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["content"], "latest question");
+        assert!(!drop_oldest_tool_turn(&mut messages));
     }
 
     #[test]

@@ -4,6 +4,7 @@ use crate::chat::{ChatMessage, Engine, Generation, TextSink};
 use crate::options::ChatOptions;
 use crate::serve::openai::{self, *};
 use crate::serve::queue::QueueTicket;
+use llama_cpp_4::chat::ToolChoice as LlamaToolChoice;
 use std::io::{self, Read};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
@@ -282,6 +283,13 @@ fn handle_chat_completions(
         respond_error(request, error.status, &error.message);
         return;
     }
+    let tool_choice = match resolve_tool_choice(&api_request.tools, &api_request.tool_choice) {
+        Ok(choice) => choice,
+        Err(error) => {
+            respond_error(request, error.status, &error.message);
+            return;
+        }
+    };
 
     let prepared = match build_chat_messages(&api_request) {
         Ok(p) => p,
@@ -299,6 +307,7 @@ fn handle_chat_completions(
     };
     let system = prepared
         .system
+        .clone()
         .or_else(|| state.default_options.system.clone());
     let stop = stop_strings(&api_request.stop);
     let model = if api_request.model.is_empty() {
@@ -309,6 +318,138 @@ fn handle_chat_completions(
     let completion_id = completion_id();
     let created = openai::now_unix();
 
+    if let (Some(tool_choice), Some(tools)) = (tool_choice, api_request.tools.as_ref()) {
+        let (messages_json, tools_json) = match build_tool_prompt_inputs(
+            &api_request,
+            tools,
+            tool_choice.clone(),
+            state.default_options.system.as_deref(),
+        ) {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                respond_error(request, 400, &error);
+                return;
+            }
+        };
+        if api_request.stream {
+            let heartbeat_frame = match sse_frame(
+                &completion_id,
+                created,
+                &model,
+                None,
+                Some(String::new()),
+                None,
+                None,
+            ) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    respond_error(request, 500, &error);
+                    return;
+                }
+            };
+            let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(SSE_CHANNEL_CAPACITY);
+            let response = sse_response(rx, heartbeat_frame);
+            let gen_state = Arc::clone(&state);
+            let requested_tools = tools.clone();
+            std::thread::spawn(move || {
+                let result = generate_tool_chat(
+                    &gen_state,
+                    generation_ticket,
+                    ToolChatInput {
+                        messages_json: &messages_json,
+                        tools_json: &tools_json,
+                        tools: &requested_tools,
+                        choice: &tool_choice,
+                        options: &options,
+                        stop: &stop,
+                    },
+                );
+                match result {
+                    Ok((generation, ToolResponse::Text(content))) => {
+                        let mut sink = SseSink::new(tx, completion_id, created, model);
+                        let result = sink
+                            .push(&content)
+                            .and_then(|()| {
+                                sink.send_chunk(
+                                    None,
+                                    None,
+                                    None,
+                                    Some(generation.finish_reason.as_str().to_string()),
+                                )
+                            })
+                            .and_then(|()| sink.send_done());
+                        if let Err(error) = result {
+                            eprintln!("发送工具模式 SSE 响应失败：{error}");
+                        }
+                    }
+                    Ok((_, ToolResponse::Calls(calls))) => {
+                        let mut sink = SseSink::new(tx, completion_id, created, model);
+                        let result = sink
+                            .send_tool_calls(&calls)
+                            .and_then(|()| {
+                                sink.send_chunk(None, None, None, Some("tool_calls".to_string()))
+                            })
+                            .and_then(|()| sink.send_done());
+                        if let Err(error) = result {
+                            eprintln!("发送工具调用 SSE 响应失败：{error}");
+                        }
+                    }
+                    Err(error) => {
+                        let sink = SseSink::new(tx, completion_id, created, model);
+                        let _ = sink.send_chunk(None, None, None, Some("server_error".to_string()));
+                        let _ = sink.send_done();
+                        eprintln!("生成工具调用时出错：{error}");
+                    }
+                }
+            });
+            let _ = request.respond(response);
+        } else {
+            match generate_tool_chat(
+                &state,
+                generation_ticket,
+                ToolChatInput {
+                    messages_json: &messages_json,
+                    tools_json: &tools_json,
+                    tools,
+                    choice: &tool_choice,
+                    options: &options,
+                    stop: &stop,
+                },
+            ) {
+                Ok((generation, result)) => {
+                    let (content, calls, finish_reason) = match result {
+                        ToolResponse::Text(content) => (
+                            Some(content),
+                            None,
+                            generation.finish_reason.as_str().to_string(),
+                        ),
+                        ToolResponse::Calls(calls) => (None, Some(calls), "tool_calls".to_string()),
+                    };
+                    let body = serde_json::to_string(&ChatCompletionResponse {
+                        id: completion_id,
+                        object: "chat.completion",
+                        created,
+                        model,
+                        choices: vec![ChatChoice {
+                            index: 0,
+                            message: ChoiceMessage {
+                                role: "assistant",
+                                content,
+                                tool_calls: calls,
+                            },
+                            finish_reason,
+                        }],
+                        usage: Usage::new(generation.prompt_tokens, generation.generated_tokens),
+                    })
+                    .unwrap_or_default();
+                    respond_json(request, StatusCode(200), &body);
+                }
+                Err(error) => respond_error(request, 500, &error),
+            }
+        }
+        return;
+    }
+
     if api_request.stream {
         let heartbeat_frame = match sse_frame(
             &completion_id,
@@ -316,6 +457,7 @@ fn handle_chat_completions(
             &model,
             None,
             Some(String::new()),
+            None,
             None,
         ) {
             Ok(frame) => frame,
@@ -349,12 +491,13 @@ fn handle_chat_completions(
                     let _ = sink.send_chunk(
                         None,
                         None,
+                        None,
                         Some(generation.finish_reason.as_str().to_string()),
                     );
                     let _ = sink.send_done();
                 }
                 Err(err) => {
-                    let _ = sink.send_chunk(None, None, Some("server_error".to_string()));
+                    let _ = sink.send_chunk(None, None, None, Some("server_error".to_string()));
                     let _ = sink.send_done();
                     eprintln!("生成过程中出错：{err}");
                 }
@@ -382,7 +525,8 @@ fn handle_chat_completions(
                         index: 0,
                         message: ChoiceMessage {
                             role: "assistant",
-                            content: generation.text,
+                            content: Some(generation.text),
+                            tool_calls: None,
                         },
                         finish_reason: generation.finish_reason.as_str().to_string(),
                     }],
@@ -396,6 +540,91 @@ fn handle_chat_completions(
             }
         }
     }
+}
+
+fn build_tool_prompt_inputs(
+    request: &ChatCompletionRequest,
+    tools: &[ToolDefinition],
+    choice: ResolvedToolChoice,
+    default_system: Option<&str>,
+) -> Result<(String, String), String> {
+    let mut messages = request.messages.clone();
+    if !messages
+        .iter()
+        .any(|message| matches!(message.role.as_str(), "system" | "developer"))
+        && let Some(system) = default_system
+    {
+        messages.insert(
+            0,
+            RequestMessage {
+                role: "system".to_string(),
+                content: Some(Content::Text(system.to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        );
+    }
+    let tools: Vec<_> = match choice {
+        ResolvedToolChoice::Named(ref name) => tools
+            .iter()
+            .filter(|tool| tool.function.name == *name)
+            .cloned()
+            .collect(),
+        _ => tools.to_vec(),
+    };
+    let messages_json =
+        serde_json::to_string(&messages).map_err(|error| format!("消息序列化失败：{error}"))?;
+    let tools_json =
+        serde_json::to_string(&tools).map_err(|error| format!("工具定义序列化失败：{error}"))?;
+    Ok((messages_json, tools_json))
+}
+
+struct ToolChatInput<'a> {
+    messages_json: &'a str,
+    tools_json: &'a str,
+    tools: &'a [ToolDefinition],
+    choice: &'a ResolvedToolChoice,
+    options: &'a ChatOptions,
+    stop: &'a [String],
+}
+
+fn generate_tool_chat(
+    state: &ServerState,
+    ticket: QueueTicket,
+    input: ToolChatInput<'_>,
+) -> Result<(Generation, ToolResponse), String> {
+    let _guard = ticket.acquire();
+    let mut context = state.engine.new_context()?;
+    let llama_choice = match input.choice {
+        ResolvedToolChoice::Auto => LlamaToolChoice::Auto,
+        ResolvedToolChoice::None => LlamaToolChoice::None,
+        ResolvedToolChoice::Required | ResolvedToolChoice::Named(_) => LlamaToolChoice::Required,
+    };
+    let (tokens, chat_params) = state.engine.prepare_tool_chat(
+        input.messages_json,
+        input.tools_json,
+        llama_choice,
+        input.options.max_tokens,
+    )?;
+    let mut stop = input.stop.to_vec();
+    let template_stops: Vec<String> = serde_json::from_str(&chat_params.additional_stops_json)
+        .map_err(|error| format!("无法解析模板停止标记：{error}"))?;
+    stop.extend(template_stops);
+    let mut sink = NullSink;
+    let generation = state.engine.generate_with_chat_params(
+        &mut context,
+        &tokens,
+        input.options,
+        &stop,
+        &mut sink,
+        &chat_params,
+    )?;
+    let parsed = chat_params
+        .parse(&generation.text, false)
+        .unwrap_or_else(|_| generation.text.clone());
+    let result = parse_tool_response(&parsed, &generation.text, input.tools, input.choice);
+    Ok((generation, result))
 }
 
 // ---- completions (legacy) ----
@@ -527,10 +756,21 @@ struct SseSink {
 }
 
 impl SseSink {
+    fn new(tx: SyncSender<Vec<u8>>, id: String, created: u64, model: String) -> Self {
+        Self {
+            tx,
+            id,
+            created,
+            model,
+            first: true,
+        }
+    }
+
     fn send_chunk(
         &self,
         role: Option<&'static str>,
         content: Option<String>,
+        tool_calls: Option<Vec<ToolCallDelta>>,
         finish_reason: Option<String>,
     ) -> Result<(), String> {
         self.tx
@@ -540,9 +780,29 @@ impl SseSink {
                 &self.model,
                 role,
                 content,
+                tool_calls,
                 finish_reason,
             )?)
             .map_err(|_| "客户端已断开".to_string())
+    }
+
+    fn send_tool_calls(&mut self, calls: &[ToolCall]) -> Result<(), String> {
+        let role = self.first.then_some("assistant");
+        self.first = false;
+        let calls = calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| ToolCallDelta {
+                index,
+                id: Some(call.id.clone()),
+                kind: Some(call.kind),
+                function: ToolCallFunctionDelta {
+                    name: Some(call.function.name.clone()),
+                    arguments: Some(call.function.arguments.clone()),
+                },
+            })
+            .collect();
+        self.send_chunk(role, None, Some(calls), None)
     }
 
     fn send_done(&self) -> Result<(), String> {
@@ -558,6 +818,7 @@ fn sse_frame(
     model: &str,
     role: Option<&'static str>,
     content: Option<String>,
+    tool_calls: Option<Vec<ToolCallDelta>>,
     finish_reason: Option<String>,
 ) -> Result<Vec<u8>, String> {
     let chunk = ChatCompletionChunk {
@@ -567,7 +828,11 @@ fn sse_frame(
         model: model.to_string(),
         choices: vec![ChunkChoice {
             index: 0,
-            delta: ChunkDelta { role, content },
+            delta: ChunkDelta {
+                role,
+                content,
+                tool_calls,
+            },
             finish_reason,
         }],
     };
@@ -584,7 +849,7 @@ impl TextSink for SseSink {
         let role = self.first.then_some("assistant");
         self.first = false;
         let content = Some(text.to_string());
-        self.send_chunk(role, content, None)
+        self.send_chunk(role, content, None, None)
     }
 }
 
@@ -761,7 +1026,8 @@ mod tests {
     #[test]
     fn channel_reader_sends_heartbeat_until_first_chunk() {
         let (tx, rx) = mpsc::sync_channel(1);
-        let heartbeat = sse_frame("test", 1, "test", None, Some(String::new()), None).unwrap();
+        let heartbeat =
+            sse_frame("test", 1, "test", None, Some(String::new()), None, None).unwrap();
         let mut reader = ChannelReader::new(rx, heartbeat.clone(), Duration::from_millis(10));
         let mut buf = [0u8; 512];
 
@@ -778,6 +1044,39 @@ mod tests {
         assert_eq!(&buf[..n], b"data: token\n\n");
         drop(tx);
         assert_eq!(reader.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn sse_tool_call_delta_uses_openai_fields() {
+        let frame = sse_frame(
+            "chatcmpl-1",
+            1,
+            "qwen",
+            Some("assistant"),
+            None,
+            Some(vec![ToolCallDelta {
+                index: 0,
+                id: Some("call_1".to_string()),
+                kind: Some("function"),
+                function: ToolCallFunctionDelta {
+                    name: Some("weather".to_string()),
+                    arguments: Some(r#"{"city":"Tokyo"}"#.to_string()),
+                },
+            }]),
+            None,
+        )
+        .unwrap();
+        let payload = std::str::from_utf8(&frame[6..frame.len() - 2]).unwrap();
+        let chunk: serde_json::Value = serde_json::from_str(payload).unwrap();
+        let delta = &chunk["choices"][0]["delta"];
+        assert_eq!(delta["role"], "assistant");
+        assert_eq!(delta["tool_calls"][0]["index"], 0);
+        assert_eq!(delta["tool_calls"][0]["id"], "call_1");
+        assert_eq!(delta["tool_calls"][0]["type"], "function");
+        assert_eq!(
+            delta["tool_calls"][0]["function"]["arguments"],
+            r#"{"city":"Tokyo"}"#
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use crate::chat::ChatMessage;
 use crate::options::ChatOptions;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::hash::{BuildHasher, Hasher};
 
 /// 一个可渲染为 OpenAI 风格错误响应的错误。
@@ -22,14 +22,14 @@ impl ApiError {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub(crate) enum Content {
     Text(String),
     Parts(Vec<ContentPart>),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct ContentPart {
     #[serde(rename = "type")]
     kind: String,
@@ -59,12 +59,109 @@ pub(crate) struct ChatCompletionRequest {
     pub(crate) stop: Option<StopValue>,
     pub(crate) seed: Option<u64>,
     pub(crate) n: Option<usize>,
+    pub(crate) tools: Option<Vec<ToolDefinition>>,
+    pub(crate) tool_choice: Option<ToolChoice>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RequestMessage {
+    pub(crate) role: String,
+    #[serde(default)]
+    pub(crate) content: Option<Content>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_calls: Option<Vec<RequestToolCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct RequestToolCall {
+    pub(crate) id: String,
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+    pub(crate) function: ToolCallFunction,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct ToolCallFunction {
+    pub(crate) name: String,
+    pub(crate) arguments: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct ToolDefinition {
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+    pub(crate) function: FunctionDefinition,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct FunctionDefinition {
+    pub(crate) name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) parameters: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) strict: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct RequestMessage {
-    pub(crate) role: String,
-    pub(crate) content: Content,
+#[serde(untagged)]
+pub(crate) enum ToolChoice {
+    Mode(String),
+    Function(NamedToolChoice),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct NamedToolChoice {
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+    pub(crate) function: NamedFunctionChoice,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct NamedFunctionChoice {
+    pub(crate) name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolvedToolChoice {
+    Auto,
+    None,
+    Required,
+    Named(String),
+}
+
+#[derive(Debug)]
+pub(crate) enum ToolResponse {
+    Text(String),
+    Calls(Vec<ToolCall>),
+}
+
+#[derive(Debug, Deserialize)]
+struct ParsedToolCall {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    function: ParsedToolCallFunction,
+}
+
+#[derive(Debug, Deserialize)]
+struct ParsedToolCallFunction {
+    name: String,
+    arguments: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct ParsedAssistantMessage {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ParsedToolCall>>,
 }
 
 /// `POST /v1/completions` 的请求体。
@@ -106,6 +203,7 @@ enum RoleKind {
     System,
     User,
     Assistant,
+    Tool,
 }
 
 fn role_kind(role: &str) -> Result<RoleKind, ApiError> {
@@ -113,8 +211,9 @@ fn role_kind(role: &str) -> Result<RoleKind, ApiError> {
         "system" | "developer" => Ok(RoleKind::System),
         "user" => Ok(RoleKind::User),
         "assistant" => Ok(RoleKind::Assistant),
+        "tool" => Ok(RoleKind::Tool),
         other => Err(ApiError::bad_request(format!(
-            "不支持的角色“{other}”：wolf 仅支持 system/developer/user/assistant，不支持工具调用。"
+            "不支持的角色“{other}”：wolf 仅支持 system/developer/user/assistant/tool。"
         ))),
     }
 }
@@ -144,11 +243,51 @@ pub(crate) fn build_chat_messages(
     let mut system_parts = Vec::new();
     let mut messages = Vec::new();
     for message in &request.messages {
-        let content = parse_content(&message.content)?;
+        if let Some(calls) = &message.tool_calls {
+            if message.role != "assistant" {
+                return Err(ApiError::bad_request(
+                    "tool_calls 只能出现在 assistant 消息中。",
+                ));
+            }
+            if calls.iter().any(|call| call.kind != "function") {
+                return Err(ApiError::bad_request(
+                    "assistant 历史消息仅支持 function 类型的 tool_calls。",
+                ));
+            }
+        }
+        if message.role == "tool" && message.tool_call_id.as_deref().is_none_or(str::is_empty) {
+            return Err(ApiError::bad_request(
+                "role 为 tool 的消息必须提供 tool_call_id。",
+            ));
+        }
+        let mut content = match &message.content {
+            Some(content) => parse_content(content)?,
+            None if message.role == "assistant" && message.tool_calls.is_some() => {
+                serde_json::to_string(&message.tool_calls)
+                    .map_err(|error| ApiError::bad_request(error.to_string()))?
+            }
+            None => {
+                return Err(ApiError::bad_request(format!(
+                    "role 为“{}”的消息必须提供 content。",
+                    message.role
+                )));
+            }
+        };
+        if message.role == "assistant"
+            && message.content.is_some()
+            && let Some(tool_calls) = &message.tool_calls
+        {
+            content.push('\n');
+            content.push_str(
+                &serde_json::to_string(tool_calls)
+                    .map_err(|error| ApiError::bad_request(error.to_string()))?,
+            );
+        }
         match role_kind(&message.role)? {
             RoleKind::System => system_parts.push(content),
             RoleKind::User => messages.push(ChatMessage::new("user", content)),
             RoleKind::Assistant => messages.push(ChatMessage::new("assistant", content)),
+            RoleKind::Tool => messages.push(ChatMessage::new("tool", content)),
         }
     }
     if messages.is_empty() {
@@ -158,6 +297,173 @@ pub(crate) fn build_chat_messages(
     }
     let system = (!system_parts.is_empty()).then(|| system_parts.join("\n\n"));
     Ok(PreparedChat { system, messages })
+}
+
+pub(crate) fn parse_tool_response(
+    parsed: &str,
+    raw_text: &str,
+    tools: &[ToolDefinition],
+    choice: &ResolvedToolChoice,
+) -> ToolResponse {
+    let parsed_message = serde_json::from_str::<ParsedAssistantMessage>(parsed).ok();
+    let nested_message = parsed_message
+        .as_ref()
+        .and_then(|message| message.content.as_deref())
+        .and_then(|content| serde_json::from_str::<ParsedAssistantMessage>(content).ok());
+    let candidates = parsed_message
+        .as_ref()
+        .and_then(|message| message.tool_calls.as_deref())
+        .or_else(|| {
+            nested_message
+                .as_ref()
+                .and_then(|message| message.tool_calls.as_deref())
+        });
+
+    if let Some(calls) = candidates
+        && !calls.is_empty()
+        && let Some(calls) = convert_tool_calls(calls, tools, choice)
+    {
+        return ToolResponse::Calls(calls);
+    }
+
+    if let Ok(message) = serde_json::from_str::<ParsedAssistantMessage>(raw_text)
+        && let Some(calls) = message.tool_calls
+        && !calls.is_empty()
+        && let Some(calls) = convert_tool_calls(&calls, tools, choice)
+    {
+        return ToolResponse::Calls(calls);
+    }
+
+    ToolResponse::Text(
+        parsed_message
+            .as_ref()
+            .and_then(|message| message.content.clone())
+            .or_else(|| nested_message.and_then(|message| message.content))
+            .unwrap_or_else(|| raw_text.to_string()),
+    )
+}
+
+fn convert_tool_calls(
+    calls: &[ParsedToolCall],
+    tools: &[ToolDefinition],
+    choice: &ResolvedToolChoice,
+) -> Option<Vec<ToolCall>> {
+    calls
+        .iter()
+        .map(|call| {
+            let name = &call.function.name;
+            if matches!(choice, ResolvedToolChoice::None)
+                || call.kind.as_deref().is_some_and(|kind| kind != "function")
+                || !tools.iter().any(|tool| tool.function.name == *name)
+                || matches!(choice, ResolvedToolChoice::Named(selected) if selected != name)
+            {
+                return None;
+            }
+            let arguments = match &call.function.arguments {
+                Value::String(value) => {
+                    let parsed: Value = serde_json::from_str(value).ok()?;
+                    if !parsed.is_object() {
+                        return None;
+                    }
+                    parsed
+                }
+                Value::Object(_) => call.function.arguments.clone(),
+                _ => return None,
+            };
+            Some(ToolCall {
+                id: call.id.clone().unwrap_or_else(tool_call_id),
+                kind: "function",
+                function: ToolCallFunction {
+                    name: name.clone(),
+                    arguments: arguments.to_string(),
+                },
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn tool_call_id() -> String {
+    format!("call_{}", random_hex(12))
+}
+
+pub(crate) fn resolve_tool_choice(
+    tools: &Option<Vec<ToolDefinition>>,
+    tool_choice: &Option<ToolChoice>,
+) -> Result<Option<ResolvedToolChoice>, ApiError> {
+    let Some(tools) = tools else {
+        return match tool_choice {
+            None => Ok(None),
+            Some(ToolChoice::Mode(value)) if value == "none" => Ok(None),
+            Some(_) => Err(ApiError::bad_request(
+                "tool_choice 需要同时提供非空的 tools。",
+            )),
+        };
+    };
+
+    let mut names = std::collections::HashSet::new();
+    for tool in tools {
+        if tool.kind != "function" {
+            return Err(ApiError::bad_request(format!(
+                "不支持的工具类型“{}”，仅支持 function。",
+                tool.kind
+            )));
+        }
+        let name = &tool.function.name;
+        if name.is_empty() {
+            return Err(ApiError::bad_request("函数工具名称不能为空。"));
+        }
+        if !names.insert(name) {
+            return Err(ApiError::bad_request(format!("函数工具名称“{name}”重复。")));
+        }
+        if tool
+            .function
+            .parameters
+            .as_ref()
+            .is_some_and(|parameters| !parameters.is_object())
+        {
+            return Err(ApiError::bad_request(format!(
+                "函数“{name}”的 parameters 必须是 JSON Schema 对象。"
+            )));
+        }
+    }
+
+    if tools.is_empty() {
+        return match tool_choice {
+            None => Ok(None),
+            Some(ToolChoice::Mode(value)) if value == "none" || value == "auto" => Ok(None),
+            Some(_) => Err(ApiError::bad_request("tools 为空时不能要求模型调用工具。")),
+        };
+    }
+
+    let choice = match tool_choice {
+        None => ResolvedToolChoice::Auto,
+        Some(ToolChoice::Mode(value)) => match value.as_str() {
+            "auto" => ResolvedToolChoice::Auto,
+            "none" => ResolvedToolChoice::None,
+            "required" => ResolvedToolChoice::Required,
+            _ => {
+                return Err(ApiError::bad_request(format!(
+                    "不支持的 tool_choice 值“{value}”。"
+                )));
+            }
+        },
+        Some(ToolChoice::Function(value)) => {
+            if value.kind != "function" {
+                return Err(ApiError::bad_request(format!(
+                    "不支持的 tool_choice 类型“{}”。",
+                    value.kind
+                )));
+            }
+            if !names.contains(&value.function.name) {
+                return Err(ApiError::bad_request(format!(
+                    "tool_choice 指定了未声明的函数“{}”。",
+                    value.function.name
+                )));
+            }
+            ResolvedToolChoice::Named(value.function.name.clone())
+        }
+    };
+    Ok(Some(choice))
 }
 
 pub(crate) fn build_completion_message(
@@ -334,7 +640,17 @@ pub(crate) struct ChatChoice {
 #[derive(Debug, Serialize)]
 pub(crate) struct ChoiceMessage {
     pub(crate) role: &'static str,
-    pub(crate) content: String,
+    pub(crate) content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_calls: Option<Vec<ToolCall>>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ToolCall {
+    pub(crate) id: String,
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) function: ToolCallFunction,
 }
 
 #[derive(Debug, Serialize)]
@@ -360,6 +676,26 @@ pub(crate) struct ChunkDelta {
     pub(crate) role: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_calls: Option<Vec<ToolCallDelta>>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ToolCallDelta {
+    pub(crate) index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub(crate) kind: Option<&'static str>,
+    pub(crate) function: ToolCallFunctionDelta,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ToolCallFunctionDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) arguments: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -460,6 +796,124 @@ mod tests {
     }
 
     #[test]
+    fn parses_tool_calls_and_tool_result_history() {
+        let request: ChatCompletionRequest = parse(
+            r#"{
+                "messages": [
+                    {"role": "user", "content": "weather"},
+                    {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "weather", "arguments": "{\"city\":\"Tokyo\"}"}
+                        }]
+                    },
+                    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+                ],
+                "tools": [{
+                    "type": "function",
+                    "function": {"name": "weather", "parameters": {"type": "object"}}
+                }],
+                "tool_choice": "auto"
+            }"#,
+        );
+        let prepared = build_chat_messages(&request).unwrap();
+        assert_eq!(prepared.messages.len(), 3);
+        assert!(prepared.messages[1].content.contains("weather"));
+        assert_eq!(prepared.messages[2].role, "tool");
+        assert_eq!(
+            resolve_tool_choice(&request.tools, &request.tool_choice).unwrap(),
+            Some(ResolvedToolChoice::Auto)
+        );
+    }
+
+    #[test]
+    fn validates_tool_choice_and_tool_definitions() {
+        let request: ChatCompletionRequest = parse(
+            r#"{
+                "tools": [
+                    {"type": "function", "function": {"name": "weather"}},
+                    {"type": "function", "function": {"name": "time"}}
+                ],
+                "tool_choice": {"type": "function", "function": {"name": "time"}}
+            }"#,
+        );
+        assert_eq!(
+            resolve_tool_choice(&request.tools, &request.tool_choice).unwrap(),
+            Some(ResolvedToolChoice::Named("time".to_string()))
+        );
+
+        let invalid: ChatCompletionRequest = parse(
+            r#"{
+                "tools": [{"type": "function", "function": {"name": "weather"}}],
+                "tool_choice": {"type": "function", "function": {"name": "missing"}}
+            }"#,
+        );
+        assert!(resolve_tool_choice(&invalid.tools, &invalid.tool_choice).is_err());
+        let invalid: ChatCompletionRequest = parse(r#"{"tool_choice": "required"}"#);
+        assert!(resolve_tool_choice(&invalid.tools, &invalid.tool_choice).is_err());
+    }
+
+    #[test]
+    fn parses_valid_tool_output_and_falls_back_for_invalid_output() {
+        let request: ChatCompletionRequest = parse(
+            r#"{
+                "tools": [{
+                    "type": "function",
+                    "function": {"name": "weather", "parameters": {"type": "object"}}
+                }]
+            }"#,
+        );
+        let tools = request.tools.unwrap();
+        let response = r#"{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"weather","arguments":"{\"city\":\"Tokyo\"}"}}]}"#;
+        match parse_tool_response(
+            response,
+            "native model output",
+            &tools,
+            &ResolvedToolChoice::Auto,
+        ) {
+            ToolResponse::Calls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "weather");
+                assert_eq!(calls[0].function.arguments, r#"{"city":"Tokyo"}"#);
+            }
+            ToolResponse::Text(text) => panic!("expected tool call, got {text}"),
+        }
+
+        let invalid = r#"{"tool_calls":[{"type":"function","function":{"name":"missing","arguments":"{}"}}]}"#;
+        assert!(matches!(
+            parse_tool_response(
+                invalid,
+                "plain answer",
+                &tools,
+                &ResolvedToolChoice::Auto
+            ),
+            ToolResponse::Text(text) if text == "plain answer"
+        ));
+
+        assert!(matches!(
+            parse_tool_response(
+                response,
+                "plain answer",
+                &tools,
+                &ResolvedToolChoice::None
+            ),
+            ToolResponse::Text(text) if text == "plain answer"
+        ));
+        assert!(matches!(
+            parse_tool_response(
+                response,
+                "plain answer",
+                &tools,
+                &ResolvedToolChoice::Named("other".to_string())
+            ),
+            ToolResponse::Text(text) if text == "plain answer"
+        ));
+    }
+
+    #[test]
     fn rejects_non_text_and_unknown_roles() {
         let request: ChatCompletionRequest = parse(
             r#"{
@@ -477,7 +931,7 @@ mod tests {
 
         let request: ChatCompletionRequest = parse(
             r#"{
-                "messages": [{"role": "tool", "content": "result"}]
+                "messages": [{"role": "function", "content": "result"}]
             }"#,
         );
         assert!(
@@ -485,6 +939,15 @@ mod tests {
                 .unwrap_err()
                 .message
                 .contains("不支持的角色")
+        );
+
+        let request: ChatCompletionRequest =
+            parse(r#"{"messages": [{"role": "tool", "content": "result"}]}"#);
+        assert!(
+            build_chat_messages(&request)
+                .unwrap_err()
+                .message
+                .contains("tool_call_id")
         );
     }
 
@@ -570,6 +1033,7 @@ mod tests {
                 delta: ChunkDelta {
                     role: None,
                     content: None,
+                    tool_calls: None,
                 },
                 finish_reason: Some("stop".to_string()),
             }],
@@ -577,6 +1041,38 @@ mod tests {
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(json.contains(r#""delta":{}"#), "{json}");
         assert!(json.contains(r#""finish_reason":"stop""#), "{json}");
+    }
+
+    #[test]
+    fn serializes_tool_calls_and_omits_them_from_text_responses() {
+        let tool_message = ChoiceMessage {
+            role: "assistant",
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".to_string(),
+                kind: "function",
+                function: ToolCallFunction {
+                    name: "weather".to_string(),
+                    arguments: r#"{"city":"Tokyo"}"#.to_string(),
+                },
+            }]),
+        };
+        let value: Value = serde_json::to_value(tool_message).unwrap();
+        assert!(value["content"].is_null());
+        assert_eq!(value["tool_calls"][0]["type"], "function");
+        assert_eq!(
+            value["tool_calls"][0]["function"]["arguments"],
+            r#"{"city":"Tokyo"}"#
+        );
+
+        let text_message = ChoiceMessage {
+            role: "assistant",
+            content: Some("hello".to_string()),
+            tool_calls: None,
+        };
+        let value = serde_json::to_value(text_message).unwrap();
+        assert_eq!(value["content"], "hello");
+        assert!(value.get("tool_calls").is_none());
     }
 
     #[test]
