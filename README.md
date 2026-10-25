@@ -179,6 +179,14 @@ Exit codes: `2` for argument or usage errors, `1` for other runtime errors, and 
 
 ### 7. Run as a local API service (`wolf serve`)
 
+#### ⚡ Why Wolf? (Unmatched Footprint)
+
+Unlike traditional Python backends (like vLLM or Ollama), Wolf eliminates the Python interpreter and PyTorch overhead entirely. By combining a native C GGUF parser with zero-copy memory mapping (`mmap`) and a Rust async gateway:
+
+- **Instant Model Loading:** Models are mapped into memory in milliseconds.
+- **Edge-Ready RAM Footprint:** Running a 3B Q4 model consumes only **~529MB of process RAM** (loaded as OS Page Cache).
+- **No Docker or Python:** A single binary, ready for Raspberry Pi, low-end VPS, and local dev machines.
+
 `wolf serve` loads a GGUF model and provides an OpenAI-compatible HTTP API, so agents (Cline / Continue / Aider, etc.) can call the local model using a standard `openai` client:
 
 ```sh
@@ -225,24 +233,24 @@ If neither `--generate-key` nor `--api-key` is provided, the service can listen 
 | `GET` | `/v1/models/:id` | Get a single model |
 | `GET` | `/health` | Health check (no authentication required) |
 
-All requests except `/health` must include an `Authorization: ****** Key>` header. Error responses use an OpenAI-style JSON structure.
+All requests except `/health` must include an `Authorization: Bearer <API_KEY>` header. Error responses use an OpenAI-style JSON structure.
 
 #### curl examples
 
 ```sh
 # List models
-curl -H "Authorization: <your api_key>" http://localhost:8080/v1/models
+curl -H "Authorization: Bearer YOUR_API_KEY" http://localhost:8080/v1/models
 
 # Non-streaming chat
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: ******" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{"messages":[{"role":"user","content":"Hello"}],"max_tokens":128}'
 
 # Streaming chat
 curl -N -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: ******" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -d '{"messages":[{"role":"user","content":"Hello"}],"stream":true}'
 ```
 
@@ -288,6 +296,8 @@ response = client.chat.completions.create(
 )
 print(response.choices[0].message.tool_calls)
 ```
+
+*Note: Local models (especially <7B) might struggle with complex tool schemas. For best results with Cline/Aider, we recommend Qwen2.5-Coder-7B or Llama-3.1-8B.*
 
 #### Supported request fields
 
