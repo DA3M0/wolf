@@ -15,7 +15,10 @@ pub fn chat(
     store: ContextStore,
 ) -> Result<(), String> {
     if path.extension().and_then(|extension| extension.to_str()) != Some("gguf") {
-        return Err(format!("对话推理仅支持 GGUF 模型文件：{}", path.display()));
+        return Err(format!(
+            "Chat inference only supports GGUF model files: {}",
+            path.display()
+        ));
     }
     configure_threads(options.threads)?;
     llama::chat(path, options, archive, store)
@@ -26,7 +29,7 @@ pub(crate) fn configure_threads(threads: Option<usize>) -> Result<(), String> {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build_global()
-            .map_err(|error| format!("无法设置 CPU 推理线程数：{error}"))?;
+            .map_err(|error| format!("Failed to set CPU inference thread count: {error}"))?;
     }
     Ok(())
 }

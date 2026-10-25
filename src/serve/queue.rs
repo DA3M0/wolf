@@ -18,8 +18,8 @@ pub(crate) struct FifoQueue {
 
 impl FifoQueue {
     pub(crate) fn new(max_active: usize) -> Result<Self, String> {
-        let max_active =
-            NonZeroUsize::new(max_active).ok_or_else(|| "并发生成数必须大于 0。".to_string())?;
+        let max_active = NonZeroUsize::new(max_active)
+            .ok_or_else(|| "Maximum concurrent generations must be greater than 0.".to_string())?;
         Ok(Self {
             state: Mutex::new(QueueState::default()),
             changed: Condvar::new(),

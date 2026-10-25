@@ -36,9 +36,12 @@ pub struct ContextArchive {
 impl ContextArchive {
     pub fn new(model_path: &Path, options: ChatOptions) -> Result<Self, String> {
         ensure_gguf_path(model_path)?;
-        let model_path = model_path
-            .canonicalize()
-            .map_err(|error| format!("无法解析模型路径“{}”：{error}", model_path.display()))?;
+        let model_path = model_path.canonicalize().map_err(|error| {
+            format!(
+                "Failed to resolve model path '{}': {error}",
+                model_path.display()
+            )
+        })?;
         let now = unix_timestamp()?;
         Ok(Self {
             schema_version: SCHEMA_VERSION,
@@ -54,7 +57,7 @@ impl ContextArchive {
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != SCHEMA_VERSION {
             return Err(format!(
-                "上下文“{}”使用不支持的数据版本 {}（当前支持版本 {}）。",
+                "Context '{}' uses unsupported data version {} (currently supported: {}).",
                 self.name, self.schema_version, SCHEMA_VERSION
             ));
         }
@@ -67,7 +70,10 @@ impl ContextArchive {
             || !self.options.repeat_penalty.is_finite()
             || self.options.repeat_penalty < 1.0
         {
-            return Err(format!("上下文“{}”包含无效的推理选项。", self.name));
+            return Err(format!(
+                "Context '{}' contains invalid inference options.",
+                self.name
+            ));
         }
         Ok(())
     }
@@ -79,12 +85,15 @@ impl ContextArchive {
         options_specified: bool,
     ) -> Result<ChatOptions, String> {
         ensure_gguf_path(model_path)?;
-        let resolved_path = model_path
-            .canonicalize()
-            .map_err(|error| format!("无法解析模型路径“{}”：{error}", model_path.display()))?;
+        let resolved_path = model_path.canonicalize().map_err(|error| {
+            format!(
+                "Failed to resolve model path '{}': {error}",
+                model_path.display()
+            )
+        })?;
         if resolved_path.to_string_lossy().as_ref() != self.model_path.as_str() {
             return Err(format!(
-                "上下文“{}”绑定到模型“{}”，不能用于“{}”。",
+                "Context '{}' is bound to model '{}', not '{}'.",
                 self.name,
                 self.model_path,
                 resolved_path.display()
@@ -92,7 +101,7 @@ impl ContextArchive {
         }
         if options_specified && requested_options != &self.options {
             return Err(format!(
-                "上下文“{}”保存的推理选项与命令行选项不匹配；请省略推理选项以恢复存档设置，或使用相同选项。",
+                "Inference options saved in context '{}' do not match the command-line options; omit inference options to restore the archived settings, or use the same options.",
                 self.name
             ));
         }
@@ -113,14 +122,18 @@ impl ContextStore {
     pub fn load(&self, name: &str) -> Result<ContextArchive, String> {
         let directory = self.directory()?;
         let path = Self::archive_path(&directory, name)?;
-        let bytes = fs::read(&path)
-            .map_err(|error| format!("无法读取上下文“{name}”（{}）：{error}", path.display()))?;
+        let bytes = fs::read(&path).map_err(|error| {
+            format!(
+                "Failed to read context '{name}' ({}): {error}",
+                path.display()
+            )
+        })?;
         let archive: ContextArchive = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("上下文“{name}”不是有效的 JSON 存档：{error}"))?;
+            .map_err(|error| format!("Context '{name}' is not a valid JSON archive: {error}"))?;
         archive.validate()?;
         if archive.name != name {
             return Err(format!(
-                "上下文文件“{}”中的名称与请求名称不匹配。",
+                "Name in context file '{}' does not match the requested name.",
                 path.display()
             ));
         }
@@ -132,20 +145,24 @@ impl ContextStore {
         archive.updated_at = unix_timestamp()?;
         archive.validate()?;
         let directory = self.directory()?;
-        fs::create_dir_all(&directory)
-            .map_err(|error| format!("无法创建上下文目录“{}”：{error}", directory.display()))?;
+        fs::create_dir_all(&directory).map_err(|error| {
+            format!(
+                "Failed to create context directory '{}': {error}",
+                directory.display()
+            )
+        })?;
         #[cfg(unix)]
         if self.directory.is_none() {
             fs::set_permissions(&directory, Permissions::from_mode(0o700)).map_err(|error| {
                 format!(
-                    "无法限制默认上下文目录“{}”的访问权限：{error}",
+                    "Failed to restrict permissions on the default context directory '{}': {error}",
                     directory.display()
                 )
             })?;
         }
         let target = Self::archive_path(&directory, &archive.name)?;
         let bytes = serde_json::to_vec_pretty(&archive)
-            .map_err(|error| format!("无法序列化上下文“{}”：{error}", archive.name))?;
+            .map_err(|error| format!("Failed to serialize context '{}': {error}", archive.name))?;
         let (temp_path, mut file) = loop {
             let temp_path = Self::temporary_path(&directory, &archive.name);
             let mut open_options = OpenOptions::new();
@@ -157,7 +174,7 @@ impl ContextStore {
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => {
                     return Err(format!(
-                        "无法创建上下文临时文件“{}”：{error}",
+                        "Failed to create temporary context file '{}': {error}",
                         temp_path.display()
                     ));
                 }
@@ -165,13 +182,16 @@ impl ContextStore {
         };
         if let Err(error) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
             let _ = fs::remove_file(&temp_path);
-            return Err(format!("无法写入上下文“{}”：{error}", archive.name));
+            return Err(format!(
+                "Failed to write context '{}': {error}",
+                archive.name
+            ));
         }
         drop(file);
         if let Err(error) = fs::rename(&temp_path, &target) {
             let _ = fs::remove_file(&temp_path);
             return Err(format!(
-                "无法更新上下文“{}”（{}）：{error}",
+                "Failed to update context '{}' ({}): {error}",
                 archive.name,
                 target.display()
             ));
@@ -186,30 +206,32 @@ impl ContextStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => {
                 return Err(format!(
-                    "无法读取上下文目录“{}”：{error}",
+                    "Failed to read context directory '{}': {error}",
                     directory.display()
                 ));
             }
         };
         let mut archives = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|error| format!("无法读取上下文目录条目：{error}"))?;
+            let entry = entry
+                .map_err(|error| format!("Failed to read context directory entry: {error}"))?;
             let path = entry.path();
             if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
                 continue;
             }
-            let bytes = fs::read(&path)
-                .map_err(|error| format!("无法读取上下文文件“{}”：{error}", path.display()))?;
+            let bytes = fs::read(&path).map_err(|error| {
+                format!("Failed to read context file '{}': {error}", path.display())
+            })?;
             let archive: ContextArchive = serde_json::from_slice(&bytes).map_err(|error| {
                 format!(
-                    "上下文文件“{}”不是有效的 JSON 存档：{error}",
+                    "Context file '{}' is not a valid JSON archive: {error}",
                     path.display()
                 )
             })?;
             archive.validate()?;
             if path.file_stem().and_then(|stem| stem.to_str()) != Some(archive.name.as_str()) {
                 return Err(format!(
-                    "上下文文件“{}”的文件名与存档名称不匹配。",
+                    "Filename of context file '{}' does not match the archive name.",
                     path.display()
                 ));
             }
@@ -222,8 +244,12 @@ impl ContextStore {
     pub fn delete(&self, name: &str) -> Result<(), String> {
         let directory = self.directory()?;
         let path = Self::archive_path(&directory, name)?;
-        fs::remove_file(&path)
-            .map_err(|error| format!("无法删除上下文“{name}”（{}）：{error}", path.display()))
+        fs::remove_file(&path).map_err(|error| {
+            format!(
+                "Failed to delete context '{name}' ({}): {error}",
+                path.display()
+            )
+        })
     }
 
     fn directory(&self) -> Result<PathBuf, String> {
@@ -247,7 +273,7 @@ impl ContextStore {
 fn ensure_gguf_path(path: &Path) -> Result<(), String> {
     if path.extension().and_then(|extension| extension.to_str()) != Some("gguf") {
         return Err(format!(
-            "对话和上下文仅支持 GGUF 模型文件：{}",
+            "Chat and contexts only support GGUF model files: {}",
             path.display()
         ));
     }
@@ -264,7 +290,7 @@ fn validate_name(name: &str) -> Result<(), String> {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
         return Err(
-            "上下文名称必须为 1–64 个 ASCII 字母、数字、点、短横线或下划线，且不能是“.”或“..”。"
+            "Context names must be 1-64 ASCII letters, digits, periods, hyphens, or underscores, and cannot be '.' or '..'."
                 .into(),
         );
     }
@@ -276,14 +302,19 @@ fn default_context_directory() -> Result<PathBuf, String> {
     {
         let base = std::env::var_os("LOCALAPPDATA")
             .or_else(|| std::env::var_os("APPDATA"))
-            .ok_or_else(|| "无法确定用户数据目录；请使用 --context-dir 指定。".to_string())?;
+            .ok_or_else(|| {
+                "Unable to determine the user data directory; specify one with --context-dir."
+                    .to_string()
+            })?;
         return Ok(PathBuf::from(base).join("wolf").join("contexts"));
     }
 
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| "无法确定用户数据目录；请使用 --context-dir 指定。".to_string())?;
+        let home = std::env::var_os("HOME").ok_or_else(|| {
+            "Unable to determine the user data directory; specify one with --context-dir."
+                .to_string()
+        })?;
         return Ok(PathBuf::from(home)
             .join("Library")
             .join("Application Support")
@@ -298,8 +329,10 @@ fn default_context_directory() -> Result<PathBuf, String> {
         {
             return Ok(base.join("wolf").join("contexts"));
         }
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| "无法确定用户数据目录；请使用 --context-dir 指定。".to_string())?;
+        let home = std::env::var_os("HOME").ok_or_else(|| {
+            "Unable to determine the user data directory; specify one with --context-dir."
+                .to_string()
+        })?;
         return Ok(PathBuf::from(home)
             .join(".local")
             .join("share")
@@ -308,14 +341,14 @@ fn default_context_directory() -> Result<PathBuf, String> {
     }
 
     #[allow(unreachable_code)]
-    Err("当前平台无法确定用户数据目录；请使用 --context-dir 指定。".into())
+    Err("Unable to determine the user data directory on this platform; specify one with --context-dir.".into())
 }
 
 fn unix_timestamp() -> Result<u64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
-        .map_err(|error| format!("系统时间早于 Unix epoch，无法创建上下文存档：{error}"))
+        .map_err(|error| format!("System time is earlier than the Unix epoch; unable to create context archive: {error}"))
 }
 
 #[cfg(test)]
@@ -380,7 +413,7 @@ mod tests {
         let (store, directory) = test_store();
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("broken.json"), b"{").unwrap();
-        assert!(store.load("broken").unwrap_err().contains("有效的 JSON"));
+        assert!(store.load("broken").unwrap_err().contains("valid JSON"));
         fs::remove_file(directory.join("broken.json")).unwrap();
 
         let mut archive = test_archive("unsupported");
@@ -390,7 +423,12 @@ mod tests {
             serde_json::to_vec(&archive).unwrap(),
         )
         .unwrap();
-        assert!(store.load("unsupported").unwrap_err().contains("不支持"));
+        assert!(
+            store
+                .load("unsupported")
+                .unwrap_err()
+                .contains("unsupported")
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -424,7 +462,7 @@ mod tests {
             archive
                 .validate_for_launch(&other_model, &DEFAULT_CHAT_OPTIONS, false)
                 .unwrap_err()
-                .contains("不能用于")
+                .contains("not")
         );
         let changed_options = ChatOptions {
             max_tokens: DEFAULT_CHAT_OPTIONS.max_tokens - 1,
@@ -434,11 +472,11 @@ mod tests {
             archive
                 .validate_for_launch(&model_path, &changed_options, true)
                 .unwrap_err()
-                .contains("推理选项")
+                .contains("Inference options")
         );
 
         archive.options.temperature = -1.0;
-        assert!(archive.validate().unwrap_err().contains("无效"));
+        assert!(archive.validate().unwrap_err().contains("invalid"));
         let _ = fs::remove_dir_all(directory);
     }
 

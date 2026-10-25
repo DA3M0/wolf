@@ -60,7 +60,7 @@ pub(crate) fn handle(
         respond_error(
             request,
             401,
-            "缺少有效的 API Key；请在 Authorization 头中提供 Bearer Key。",
+            "Missing or invalid API key; provide a Bearer token in the Authorization header.",
         );
         return;
     }
@@ -79,7 +79,10 @@ pub(crate) fn handle(
                 respond_error(
                     request,
                     404,
-                    &format!("模型“{id}”不存在，当前服务加载的是“{}”。", state.model_id),
+                    &format!(
+                        "Model '{id}' does not exist; the loaded model is '{}'.",
+                        state.model_id
+                    ),
                 );
             }
         }
@@ -97,9 +100,9 @@ pub(crate) fn handle(
             request,
             status.0,
             if status.0 == 405 {
-                "方法不允许。"
+                "Method not allowed."
             } else {
-                "未找到该端点。"
+                "Endpoint not found."
             },
         ),
     }
@@ -112,7 +115,7 @@ struct DisconnectSink {
 impl TextSink for DisconnectSink {
     fn push(&mut self, _text: &str) -> Result<(), String> {
         if self.disconnected.load(Ordering::Relaxed) {
-            Err("客户端已断开".to_string())
+            Err("Client disconnected".to_string())
         } else {
             Ok(())
         }
@@ -287,14 +290,22 @@ fn handle_chat_completions(
     let body = match read_body(&mut request) {
         Ok(body) => body,
         Err(error) => {
-            respond_error(request, 400, &format!("读取请求体失败：{error}"));
+            respond_error(
+                request,
+                400,
+                &format!("Failed to read request body: {error}"),
+            );
             return;
         }
     };
     let api_request: ChatCompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(error) => {
-            respond_error(request, 400, &format!("请求体不是有效的 JSON：{error}"));
+            respond_error(
+                request,
+                400,
+                &format!("Request body is not valid JSON: {error}"),
+            );
             return;
         }
     };
@@ -398,7 +409,7 @@ fn handle_chat_completions(
                             })
                             .and_then(|()| sink.send_done());
                         if let Err(error) = result {
-                            eprintln!("发送工具模式 SSE 响应失败：{error}");
+                            eprintln!("Failed to send tool-mode SSE response: {error}");
                         }
                     }
                     Ok((_, ToolResponse::Calls(calls))) => {
@@ -410,14 +421,14 @@ fn handle_chat_completions(
                             })
                             .and_then(|()| sink.send_done());
                         if let Err(error) = result {
-                            eprintln!("发送工具调用 SSE 响应失败：{error}");
+                            eprintln!("Failed to send tool-call SSE response: {error}");
                         }
                     }
                     Err(error) => {
                         let sink = SseSink::new(tx, completion_id, created, model);
                         let _ = sink.send_chunk(None, None, None, Some("server_error".to_string()));
                         let _ = sink.send_done();
-                        eprintln!("生成工具调用时出错：{error}");
+                        eprintln!("Tool-call generation failed: {error}");
                     }
                 }
             });
@@ -508,14 +519,14 @@ fn handle_chat_completions(
                         &generation.text,
                         generation.finish_reason.as_str(),
                     ) {
-                        eprintln!("发送 chat SSE 响应失败：{err}");
+                        eprintln!("Failed to send chat SSE response: {err}");
                     }
                 }
                 Err(err) => {
                     let sink = SseSink::new(tx, completion_id, created, model);
                     let _ = sink.send_chunk(None, None, None, Some("server_error".to_string()));
                     let _ = sink.send_done();
-                    eprintln!("生成过程中出错：{err}");
+                    eprintln!("Generation failed: {err}");
                 }
             }
         });
@@ -612,10 +623,10 @@ fn build_tool_prompt_inputs(
             .collect(),
         _ => tools.to_vec(),
     };
-    let messages_json =
-        serde_json::to_string(&messages).map_err(|error| format!("消息序列化失败：{error}"))?;
-    let tools_json =
-        serde_json::to_string(&tools).map_err(|error| format!("工具定义序列化失败：{error}"))?;
+    let messages_json = serde_json::to_string(&messages)
+        .map_err(|error| format!("Failed to serialize messages: {error}"))?;
+    let tools_json = serde_json::to_string(&tools)
+        .map_err(|error| format!("Failed to serialize tool definitions: {error}"))?;
     Ok((messages_json, tools_json))
 }
 
@@ -648,7 +659,7 @@ fn generate_tool_chat(
     )?;
     let mut stop = input.stop.to_vec();
     let template_stops: Vec<String> = serde_json::from_str(&chat_params.additional_stops_json)
-        .map_err(|error| format!("无法解析模板停止标记：{error}"))?;
+        .map_err(|error| format!("Failed to parse template stop markers: {error}"))?;
     stop.extend(template_stops);
     let mut sink = NullSink;
     let generation = state.engine.generate_with_chat_params(
@@ -673,14 +684,22 @@ fn handle_completions(state: Arc<ServerState>, request: Request, generation_tick
     let body = match read_body(&mut request) {
         Ok(body) => body,
         Err(error) => {
-            respond_error(request, 400, &format!("读取请求体失败：{error}"));
+            respond_error(
+                request,
+                400,
+                &format!("Failed to read request body: {error}"),
+            );
             return;
         }
     };
     let api_request: CompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(error) => {
-            respond_error(request, 400, &format!("请求体不是有效的 JSON：{error}"));
+            respond_error(
+                request,
+                400,
+                &format!("Request body is not valid JSON: {error}"),
+            );
             return;
         }
     };
@@ -692,7 +711,7 @@ fn handle_completions(state: Arc<ServerState>, request: Request, generation_tick
         respond_error(
             request,
             400,
-            "/v1/completions 流式暂不支持，请使用 /v1/chat/completions。",
+            "Streaming for /v1/completions is not supported yet; use /v1/chat/completions.",
         );
         return;
     }
@@ -822,7 +841,7 @@ impl SseSink {
                 tool_calls,
                 finish_reason,
             )?)
-            .map_err(|_| "客户端已断开".to_string())
+            .map_err(|_| "Client disconnected".to_string())
     }
 
     fn send_tool_calls(&mut self, calls: &[ToolCall]) -> Result<(), String> {
@@ -847,7 +866,7 @@ impl SseSink {
     fn send_done(&self) -> Result<(), String> {
         self.tx
             .send(b"data: [DONE]\n\n".to_vec())
-            .map_err(|_| "客户端已断开".to_string())
+            .map_err(|_| "Client disconnected".to_string())
     }
 }
 
@@ -875,8 +894,8 @@ fn sse_frame(
             finish_reason,
         }],
     };
-    let json =
-        serde_json::to_string(&chunk).map_err(|error| format!("SSE 帧序列化失败：{error}"))?;
+    let json = serde_json::to_string(&chunk)
+        .map_err(|error| format!("Failed to serialize SSE frame: {error}"))?;
     Ok(format!("data: {json}\n\n").into_bytes())
 }
 
@@ -1100,7 +1119,7 @@ mod tests {
         assert!(sink.push("token").is_ok());
         disconnected.store(true, Ordering::Relaxed);
         assert!(sink.interrupted());
-        assert_eq!(sink.push("token"), Err("客户端已断开".to_string()));
+        assert_eq!(sink.push("token"), Err("Client disconnected".to_string()));
     }
 
     #[test]

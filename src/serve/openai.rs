@@ -216,7 +216,7 @@ fn role_kind(role: &str) -> Result<RoleKind, ApiError> {
         "assistant" => Ok(RoleKind::Assistant),
         "tool" => Ok(RoleKind::Tool),
         other => Err(ApiError::bad_request(format!(
-            "不支持的角色“{other}”：wolf 仅支持 system/developer/user/assistant/tool。"
+            "Unsupported role '{other}': wolf supports only system/developer/user/assistant/tool."
         ))),
     }
 }
@@ -229,7 +229,7 @@ fn parse_content(content: &Content) -> Result<String, ApiError> {
             for part in parts {
                 if part.kind != "text" {
                     return Err(ApiError::bad_request(format!(
-                        "消息内容仅支持文本部分，收到类型“{}”。",
+                        "Message content supports text parts only; received type '{}'.",
                         part.kind
                     )));
                 }
@@ -249,18 +249,18 @@ pub(crate) fn build_chat_messages(
         if let Some(calls) = &message.tool_calls {
             if message.role != "assistant" {
                 return Err(ApiError::bad_request(
-                    "tool_calls 只能出现在 assistant 消息中。",
+                    "tool_calls can only appear in assistant messages.",
                 ));
             }
             if calls.iter().any(|call| call.kind != "function") {
                 return Err(ApiError::bad_request(
-                    "assistant 历史消息仅支持 function 类型的 tool_calls。",
+                    "Assistant history messages support only function-type tool_calls.",
                 ));
             }
         }
         if message.role == "tool" && message.tool_call_id.as_deref().is_none_or(str::is_empty) {
             return Err(ApiError::bad_request(
-                "role 为 tool 的消息必须提供 tool_call_id。",
+                "Messages with role 'tool' must provide tool_call_id.",
             ));
         }
         let mut content = match &message.content {
@@ -271,7 +271,7 @@ pub(crate) fn build_chat_messages(
             }
             None => {
                 return Err(ApiError::bad_request(format!(
-                    "role 为“{}”的消息必须提供 content。",
+                    "Messages with role '{}' must provide content.",
                     message.role
                 )));
             }
@@ -295,7 +295,7 @@ pub(crate) fn build_chat_messages(
     }
     if messages.is_empty() {
         return Err(ApiError::bad_request(
-            "messages 中至少需要一条 user 或 assistant 消息。",
+            "messages must contain at least one user or assistant message.",
         ));
     }
     let system = (!system_parts.is_empty()).then(|| system_parts.join("\n\n"));
@@ -442,7 +442,7 @@ pub(crate) fn resolve_tool_choice(
             None => Ok(None),
             Some(ToolChoice::Mode(value)) if value == "none" => Ok(None),
             Some(_) => Err(ApiError::bad_request(
-                "tool_choice 需要同时提供非空的 tools。",
+                "tool_choice requires a non-empty tools list.",
             )),
         };
     };
@@ -451,16 +451,18 @@ pub(crate) fn resolve_tool_choice(
     for tool in tools {
         if tool.kind != "function" {
             return Err(ApiError::bad_request(format!(
-                "不支持的工具类型“{}”，仅支持 function。",
+                "Unsupported tool type '{}'; only function is supported.",
                 tool.kind
             )));
         }
         let name = &tool.function.name;
         if name.is_empty() {
-            return Err(ApiError::bad_request("函数工具名称不能为空。"));
+            return Err(ApiError::bad_request("Function tool name cannot be empty."));
         }
         if !names.insert(name) {
-            return Err(ApiError::bad_request(format!("函数工具名称“{name}”重复。")));
+            return Err(ApiError::bad_request(format!(
+                "Duplicate function tool name '{name}'."
+            )));
         }
         if tool
             .function
@@ -469,7 +471,7 @@ pub(crate) fn resolve_tool_choice(
             .is_some_and(|parameters| !parameters.is_object())
         {
             return Err(ApiError::bad_request(format!(
-                "函数“{name}”的 parameters 必须是 JSON Schema 对象。"
+                "parameters for function '{name}' must be a JSON Schema object."
             )));
         }
     }
@@ -478,7 +480,9 @@ pub(crate) fn resolve_tool_choice(
         return match tool_choice {
             None => Ok(None),
             Some(ToolChoice::Mode(value)) if value == "none" || value == "auto" => Ok(None),
-            Some(_) => Err(ApiError::bad_request("tools 为空时不能要求模型调用工具。")),
+            Some(_) => Err(ApiError::bad_request(
+                "Cannot require tool calls when tools is empty.",
+            )),
         };
     }
 
@@ -490,20 +494,20 @@ pub(crate) fn resolve_tool_choice(
             "required" => ResolvedToolChoice::Required,
             _ => {
                 return Err(ApiError::bad_request(format!(
-                    "不支持的 tool_choice 值“{value}”。"
+                    "Unsupported tool_choice value '{value}'."
                 )));
             }
         },
         Some(ToolChoice::Function(value)) => {
             if value.kind != "function" {
                 return Err(ApiError::bad_request(format!(
-                    "不支持的 tool_choice 类型“{}”。",
+                    "Unsupported tool_choice type '{}'.",
                     value.kind
                 )));
             }
             if !names.contains(&value.function.name) {
                 return Err(ApiError::bad_request(format!(
-                    "tool_choice 指定了未声明的函数“{}”。",
+                    "tool_choice specifies an undeclared function '{}'.",
                     value.function.name
                 )));
             }
@@ -521,7 +525,7 @@ pub(crate) fn build_completion_message(
         PromptValue::Many(parts) => parts.join("\n\n"),
     };
     if text.is_empty() {
-        return Err(ApiError::bad_request("prompt 不能为空。"));
+        return Err(ApiError::bad_request("prompt cannot be empty."));
     }
     Ok(ChatMessage::new("user", text))
 }
@@ -536,13 +540,13 @@ fn apply_sampling(
 ) -> Result<(), ApiError> {
     if let Some(temperature) = temperature {
         if temperature < 0.0 {
-            return Err(ApiError::bad_request("temperature 不能小于 0。"));
+            return Err(ApiError::bad_request("temperature cannot be less than 0."));
         }
         options.temperature = temperature;
     }
     if let Some(top_p) = top_p {
         if !(0.0..=1.0).contains(&top_p) {
-            return Err(ApiError::bad_request("top_p 必须介于 0 和 1 之间。"));
+            return Err(ApiError::bad_request("top_p must be between 0 and 1."));
         }
         options.top_p = top_p;
     }
@@ -566,7 +570,7 @@ pub(crate) fn resolve_chat_options(
     let max_tokens = match (request.max_tokens, request.max_completion_tokens) {
         (Some(_), Some(_)) => {
             return Err(ApiError::bad_request(
-                "max_tokens 与 max_completion_tokens 不能同时出现。",
+                "max_tokens and max_completion_tokens cannot both be provided.",
             ));
         }
         (Some(value), None) | (None, Some(value)) => Some(value),
@@ -581,7 +585,7 @@ pub(crate) fn resolve_chat_options(
         request.seed,
     )?;
     if request.n.is_some_and(|n| n > 1) {
-        return Err(ApiError::bad_request("wolf 仅支持 n=1。"));
+        return Err(ApiError::bad_request("wolf supports only n=1."));
     }
     Ok(options)
 }
@@ -600,7 +604,7 @@ pub(crate) fn resolve_completion_options(
         request.seed,
     )?;
     if request.echo {
-        return Err(ApiError::bad_request("wolf 暂不支持 echo。"));
+        return Err(ApiError::bad_request("wolf does not support echo yet."));
     }
     Ok(options)
 }
@@ -618,7 +622,7 @@ pub(crate) fn ensure_model_matches(requested: &str, loaded: &str) -> Result<(), 
     if !requested.is_empty() && requested != loaded {
         return Err(ApiError {
             status: 404,
-            message: format!("模型“{requested}”不存在；当前服务加载的是“{loaded}”。"),
+            message: format!("Model '{requested}' does not exist; the loaded model is '{loaded}'."),
         });
     }
     Ok(())
@@ -643,7 +647,7 @@ pub(crate) fn error_body(status: u16, message: &str) -> String {
         }
     }))
     .unwrap_or_else(|_| {
-        r#"{"error":{"message":"无法生成错误响应","type":"server_error","param":null,"code":null}}"#
+        r#"{"error":{"message":"Unable to generate error response","type":"server_error","param":null,"code":null}}"#
             .to_string()
     })
 }
@@ -1009,7 +1013,7 @@ mod tests {
             build_chat_messages(&request)
                 .unwrap_err()
                 .message
-                .contains("仅支持文本")
+                .contains("text parts only")
         );
 
         let request: ChatCompletionRequest = parse(
@@ -1021,7 +1025,7 @@ mod tests {
             build_chat_messages(&request)
                 .unwrap_err()
                 .message
-                .contains("不支持的角色")
+                .contains("Unsupported role")
         );
 
         let request: ChatCompletionRequest =
@@ -1098,10 +1102,10 @@ mod tests {
         assert!(ensure_model_matches("", "qwen").is_ok());
         assert!(ensure_model_matches("qwen", "qwen").is_ok());
 
-        let body = error_body(401, "缺少 API Key");
+        let body = error_body(401, "Missing API key");
         let value: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(value["error"]["type"], "authentication_error");
-        assert_eq!(value["error"]["message"], "缺少 API Key");
+        assert_eq!(value["error"]["message"], "Missing API key");
     }
 
     #[test]

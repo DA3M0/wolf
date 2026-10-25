@@ -19,7 +19,7 @@ fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("错误：{error}");
+            eprintln!("Error: {error}");
             error.exit_code()
         }
     }
@@ -62,7 +62,7 @@ fn run(args: Vec<String>) -> Result<(), RunError> {
             run_chat(&path, options, context_options)
         }
         other => Err(RunError::usage(format!(
-            "未知命令“{other}”。运行 `wolf help` 查看用法。"
+            "Unknown command '{other}'. Run `wolf help` for usage."
         ))),
     }
 }
@@ -85,7 +85,10 @@ fn run_inspect_command(args: &[String]) -> Result<(), RunError> {
 
 fn write_report(path: &Path, report: &str) -> Result<(), RunError> {
     std::fs::write(path, format!("{report}\n")).map_err(|error| {
-        RunError::Runtime(format!("无法写入检查报告“{}”：{error}", path.display()))
+        RunError::Runtime(format!(
+            "Failed to write inspection report '{}': {error}",
+            path.display()
+        ))
     })
 }
 
@@ -116,13 +119,13 @@ fn run_context_command(
     match operation {
         ContextCommand::List => {
             for archive in runtime(store.list())? {
-                println!("{:<24} {:>5} 轮", archive.name, archive.turns.len());
+                println!("{:<24} {:>5} turns", archive.name, archive.turns.len());
             }
             Ok(())
         }
         ContextCommand::Delete(name) => {
             runtime(store.delete(&name))?;
-            println!("已删除上下文“{name}”。");
+            println!("Deleted context '{name}'.");
             Ok(())
         }
     }
@@ -133,66 +136,66 @@ fn runtime<T>(result: Result<T, String>) -> Result<T, RunError> {
 }
 
 fn print_formats() {
-    println!("当前支持的权重格式：");
-    println!("  .gguf          llama.cpp 对话推理和模型信息检查（默认 CPU）");
-    println!("  .safetensors   模型信息检查（不支持对话推理）");
+    println!("Supported model formats:");
+    println!("  .gguf          llama.cpp chat inference and model inspection (CPU by default)");
+    println!("  .safetensors   Model inspection only (chat inference is not supported)");
 }
 
 fn print_help() {
     println!(
-        "wolf - Rust 本地模型加载器与对话 CLI\n\
+        "wolf - Local LLM loader and chat CLI written in Rust\n\
 \n\
-用法：\n\
-  wolf <模型路径>                         加载 GGUF 模型并进入多轮对话\n\
-  wolf chat <模型路径>                    同上\n\
-  wolf serve <名称或路径> [选项]         以 OpenAI 兼容 API 服务运行\n\
-  wolf inspect <模型文件> [选项]          检查 GGUF 或 Safetensors 文件\n\
-  wolf load <模型文件> [选项]             inspect 的兼容别名\n\
-  wolf context list [--context-dir <路径>]  列出已保存上下文\n\
-  wolf context delete <名称> [--context-dir <路径>]  删除上下文\n\
-  wolf formats                            列出支持的格式\n\
-  wolf version                            显示版本（--version / -V）\n\
-  wolf help                               显示帮助\n\
+Usage:\n\
+  wolf <model-path>                         Load a GGUF model and start a chat\n\
+  wolf chat <model-path>                    Same as above\n\
+  wolf serve <name-or-path> [options]       Run as an OpenAI-compatible API server\n\
+  wolf inspect <model-file> [options]       Inspect a GGUF or Safetensors file\n\
+  wolf load <model-file> [options]           Compatibility alias for inspect\n\
+  wolf context list [--context-dir <path>]   List saved contexts\n\
+  wolf context delete <name> [--context-dir <path>]  Delete a context\n\
+  wolf formats                               List supported formats\n\
+  wolf version                               Show the version (--version / -V)\n\
+  wolf help                                  Show this help\n\
 \n\
-对话选项：\n\
-  --threads N          推理线程数（默认由后端决定）\n\
-  --max-tokens N       每轮最大生成 token 数（默认 256）\n\
-  --temperature F      采样温度（默认 0 = 确定性贪心；0.8 左右输出更多样但每次不同）\n\
-  --top-p F            核采样概率阈值（默认 0.9，仅在 temperature > 0 时生效）\n\
-  --top-k N            top-k 采样候选数（默认关闭）\n\
-  --repeat-penalty F   重复惩罚（默认 1 = 关闭）\n\
-  --seed N             随机种子，用于复现同一次生成\n\
-  --system \"...\"       系统提示词，仅在对话首轮注入\n\
-  --context <名称>     恢复已保存的对话上下文\n\
-  --context-dir <路径> 上下文存档目录（也可用于 /save）\n\
+Chat options:\n\
+  --threads N          Number of inference threads (backend default)\n\
+  --max-tokens N       Maximum tokens to generate per turn (default: 256)\n\
+  --temperature F      Sampling temperature (default: 0, deterministic; around 0.8 for varied output)\n\
+  --top-p F            Nucleus sampling threshold (default: 0.9; only used when temperature > 0)\n\
+  --top-k N            Number of top-k sampling candidates (default: disabled)\n\
+  --repeat-penalty F   Repetition penalty (default: 1, disabled)\n\
+  --seed N             Random seed for reproducible generation\n\
+  --system \"...\"       System prompt, included only in the first turn\n\
+  --context <name>     Resume a saved chat context\n\
+  --context-dir <path> Context archive directory (also used by /save)\n\
 \n\
-服务选项（wolf serve）：\n\
-  --model <名称>        模型名称或 .gguf 文件路径（兼容旧写法）\n\
-  --model-dir <目录>    按名称搜索模型的目录（默认 .）\n\
-  --host <地址>         监听地址（默认 127.0.0.1）\n\
-  --port <端口>         监听端口（默认 8080，0 为系统分配）\n\
-  --max-concurrent-generations <N> 同时推理的请求上限（默认 1）\n\
-  --generate-key        自动生成 API Key 并打印\n\
-  --api-key <KEY>       指定 API Key\n\
-  【以上选项可与对话选项共用，设置服务默认采样参数】\n\
+Server options (wolf serve):\n\
+  --model <name>        Model name or .gguf file path (legacy syntax)\n\
+  --model-dir <dir>     Directory to search for models by name (default: .)\n\
+  --host <address>      Address to listen on (default: 127.0.0.1)\n\
+  --port <port>         Port to listen on (default: 8080; 0 assigns a free port)\n\
+  --max-concurrent-generations <N> Maximum concurrent inference requests (default: 1)\n\
+  --generate-key        Generate and print an API key\n\
+  --api-key <KEY>       Set the API key\n\
+  These options can be combined with chat options to set server defaults.\n\
 \n\
-检查选项（wolf inspect）：\n\
-  --all                 显示全部张量（默认最多 20 个）\n\
-  --json                输出 JSON 格式\n\
-  -o, --output <文件>   保存报告到文件（覆盖已有文件，不打印到终端）\n\
+Inspection options (wolf inspect):\n\
+  --all                 Show all tensors (default: at most 20)\n\
+  --json                Output JSON\n\
+  -o, --output <file>   Save the report to a file (overwrites; no terminal output)\n\
 \n\
-服务 API 端点：\n\
-  POST /v1/chat/completions    支持流式（SSE）\n\
-  POST /v1/completions         仅非流式，prompt 作为单条消息\n\
-  GET  /v1/models              列出已加载模型\n\
-  GET  /v1/models/:id          获取单个模型\n\
-  GET  /health                 健康检查（免鉴权）\n\
+Server API endpoints:\n\
+  POST /v1/chat/completions    Supports streaming (SSE)\n\
+  POST /v1/completions         Non-streaming only; prompt is sent as one message\n\
+  GET  /v1/models              List loaded models\n\
+  GET  /v1/models/:id          Get a single model\n\
+  GET  /health                 Health check (no authentication required)\n\
 \n\
-示例：\n\
+Examples:\n\
   wolf ./models/llama-2-7b-chat.Q4_K_M.gguf\n\
   wolf ./models/model.gguf --threads 8 --max-tokens 128\n\
   wolf ./models/model.gguf --temperature 0.7 --top-k 50 --seed 42\n\
-  wolf ./models/model.gguf --system \"你是一个简洁的中文助手\"\n\
+  wolf ./models/model.gguf --system \"You are a concise assistant.\"\n\
   wolf ./models/model.gguf --temperature 0\n\
   wolf serve qwen2.5-0.5b --model-dir ./models --port 8080 --generate-key\n\
   wolf serve qwen2.5-0.5b.gguf --port 8080 --api-key wolf-secret --temperature 0\n\
@@ -203,8 +206,8 @@ fn print_help() {
   wolf inspect ./model.safetensors --json\n\
   wolf inspect ./model.gguf --json --output report.json\n\
 \n\
-对话中输入 /exit 退出。GGUF 推理由 llama.cpp 提供。Safetensors 仅支持文件检查。\n\
-服务模式下 Ctrl-C 停止服务；不支持工具/函数调用。"
+Enter /exit to leave a chat. GGUF inference is provided by llama.cpp. Safetensors files can only be inspected.\n\
+Press Ctrl-C to stop the server. Tool/function calling is not supported."
     );
 }
 
@@ -212,20 +215,20 @@ fn render_model(info: &ModelInfo, show_all: bool) -> String {
     let mut output = String::new();
     use std::fmt::Write as _;
 
-    writeln!(&mut output, "模型：{}", info.path.display()).unwrap();
-    writeln!(&mut output, "格式：{}", info.format).unwrap();
-    writeln!(&mut output, "文件大小：{}", format_size(info.file_size)).unwrap();
-    writeln!(&mut output, "张量数量：{}", info.tensors.len()).unwrap();
-    writeln!(&mut output, "状态：已映射文件并验证头部").unwrap();
+    writeln!(&mut output, "Model: {}", info.path.display()).unwrap();
+    writeln!(&mut output, "Format: {}", info.format).unwrap();
+    writeln!(&mut output, "File size: {}", format_size(info.file_size)).unwrap();
+    writeln!(&mut output, "Tensor count: {}", info.tensors.len()).unwrap();
+    writeln!(&mut output, "Status: File mapped and header validated").unwrap();
 
     if !info.metadata.is_empty() {
-        output.push_str("\n元数据：\n");
+        output.push_str("\nMetadata:\n");
         for (key, value) in &info.metadata {
             writeln!(&mut output, "  {key}: {value}").unwrap();
         }
     }
     if !info.tensors.is_empty() {
-        output.push_str("\n张量：\n");
+        output.push_str("\nTensors:\n");
         let count = if show_all {
             info.tensors.len()
         } else {
@@ -246,7 +249,7 @@ fn render_model(info: &ModelInfo, show_all: bool) -> String {
         if count < info.tensors.len() {
             writeln!(
                 &mut output,
-                "  …另有 {} 个张量未显示（使用 --all 查看）",
+                "  Omitted tensors: {} (use --all to show all)",
                 info.tensors.len() - count
             )
             .unwrap();
@@ -270,7 +273,7 @@ fn render_json(info: &ModelInfo) -> Result<String, RunError> {
         })).collect::<Vec<_>>(),
     });
     serde_json::to_string_pretty(&output)
-        .map_err(|error| RunError::Runtime(format!("无法生成 JSON 输出：{error}")))
+        .map_err(|error| RunError::Runtime(format!("Failed to generate JSON output: {error}")))
 }
 
 fn format_size(size: u64) -> String {
@@ -316,7 +319,7 @@ mod tests {
         let report = render_model(&info, false);
         assert!(report.contains("tensor_19"));
         assert!(!report.contains("tensor_20"));
-        assert!(report.contains("另有 1 个张量未显示"));
+        assert!(report.contains("Omitted tensors: 1"));
         assert!(render_model(&info, true).contains("tensor_20"));
     }
 

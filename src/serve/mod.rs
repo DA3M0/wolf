@@ -17,8 +17,8 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub fn serve(options: ServeOptions, chat_options: ChatOptions) -> Result<(), String> {
     if options.api_key.is_none() && !options.generate_key && !is_loopback(&options.host) {
         return Err(format!(
-            "在“{}”上启动服务时，必须通过 --generate-key 或 --api-key 启用鉴权，\n\
-             否则不应暴露到非回环地址。若仅在本地使用请将 --host 设为 127.0.0.1。",
+            "When serving on '{}', authentication must be enabled with --generate-key or --api-key.\n\
+             Do not expose the server on a non-loopback address without authentication. For local use only, set --host to 127.0.0.1.",
             options.host
         ));
     }
@@ -26,39 +26,41 @@ pub fn serve(options: ServeOptions, chat_options: ChatOptions) -> Result<(), Str
     let (model_path, model_id) = resolve_model(&options)?;
     if model_path.extension().and_then(|ext| ext.to_str()) != Some("gguf") {
         return Err(format!(
-            "对话推理仅支持 GGUF 模型文件：{}",
+            "Chat inference only supports GGUF model files: {}",
             model_path.display()
         ));
     }
 
     chat::configure_threads(chat_options.threads)?;
-    eprintln!("正在加载模型：{}", model_path.display());
+    eprintln!("Loading model: {}", model_path.display());
 
     let engine = Engine::load(&model_path, chat_options.threads)?;
     let api_key = resolve_api_key(&options)?;
 
     let addr = format!("{}:{}", options.host, options.port);
-    let server =
-        tiny_http::Server::http(&addr).map_err(|error| format!("无法监听 {addr}：{error}"))?;
+    let server = tiny_http::Server::http(&addr)
+        .map_err(|error| format!("Failed to listen on {addr}: {error}"))?;
     let local_addr = server.server_addr();
     let port = match local_addr {
         tiny_http::ListenAddr::IP(address) => address.port(),
         #[cfg(unix)]
         tiny_http::ListenAddr::Unix(_) => {
-            return Err("暂不支持监听 Unix 套接字。".to_string());
+            return Err("Listening on Unix sockets is not supported yet.".to_string());
         }
     };
 
-    println!("已加载模型：{}", model_path.display());
-    println!("已启动服务: {}", display_url(&options.host, port));
+    println!("Loaded model: {}", model_path.display());
+    println!("Server started: {}", display_url(&options.host, port));
     if let Some(key) = &api_key {
         println!("API Key: {key}");
     } else {
-        println!("未启用 API Key 校验（服务仅监听回环地址）。");
+        println!(
+            "API key authentication is disabled (server is listening on a loopback address only)."
+        );
     }
 
     ctrlc::set_handler(|| SHUTDOWN.store(true, Ordering::SeqCst))
-        .map_err(|error| format!("无法安装 Ctrl-C 处理器：{error}"))?;
+        .map_err(|error| format!("Failed to install Ctrl-C handler: {error}"))?;
 
     let created = openai::now_unix();
     let state = Arc::new(http::ServerState {
@@ -83,12 +85,12 @@ pub fn serve(options: ServeOptions, chat_options: ChatOptions) -> Result<(), Str
             }
             Ok(None) => {}
             Err(error) => {
-                eprintln!("接收连接失败：{error}");
+                eprintln!("Failed to receive connection: {error}");
             }
         }
     }
 
-    println!("已停止服务。");
+    println!("Server stopped.");
     Ok(())
 }
 
@@ -123,7 +125,7 @@ fn resolve_model(options: &ServeOptions) -> Result<(PathBuf, String), String> {
             }
             Err(error) => {
                 return Err(format!(
-                    "无法读取模型目录“{}”：{error}",
+                    "Failed to read model directory '{}': {error}",
                     options.model_dir.display()
                 ));
             }
@@ -139,13 +141,13 @@ fn resolve_model(options: &ServeOptions) -> Result<(PathBuf, String), String> {
         let listing = list_gguf_files(&options.model_dir);
         if listing.is_empty() {
             format!(
-                "未找到模型“{}”：目录“{}”中没有 .gguf 文件。",
+                "Model '{}' not found: directory '{}' contains no .gguf files.",
                 options.model,
                 options.model_dir.display()
             )
         } else {
             format!(
-                "未找到模型“{}”。“{}”中可用的 GGUF 模型：\n{}",
+                "Model '{}' not found. Available GGUF models in '{}':\n{}",
                 options.model,
                 options.model_dir.display(),
                 listing
@@ -158,7 +160,7 @@ fn resolve_model(options: &ServeOptions) -> Result<(PathBuf, String), String> {
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "模型名称“{}”不唯一，找到 {} 个匹配：\n{list}",
+            "Model name '{}' is ambiguous; found {} matches:\n{list}",
             options.model, count
         )
     };
@@ -341,7 +343,7 @@ mod tests {
         if gguf_count > 1 {
             let err = resolve_model(&options).unwrap_err();
             assert!(
-                err.contains("不唯一"),
+                err.contains("ambiguous"),
                 "expected ambiguity message, got: {err}"
             );
         } else {

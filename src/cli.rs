@@ -1,6 +1,6 @@
 //! Command-line argument parsing and runtime options.
 
-use crate::options::{ChatOptions, DEFAULT_CHAT_OPTIONS};
+use crate::options::ChatOptions;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -79,7 +79,7 @@ pub fn parse_chat_args(
     args: &[String],
 ) -> Result<(PathBuf, ChatOptions, ContextCliOptions), RunError> {
     let mut path = None;
-    let mut options = DEFAULT_CHAT_OPTIONS;
+    let mut options = ChatOptions::default();
     let mut context = ContextCliOptions::default();
     let mut index = 0;
     while index < args.len() {
@@ -130,29 +130,29 @@ pub fn parse_chat_args(
                 index += 1;
                 let name = parse_text_option(args, index, "--context")?;
                 if context.name.replace(name).is_some() {
-                    return Err(RunError::usage("--context 只能指定一次。"));
+                    return Err(RunError::usage("--context can only be specified once."));
                 }
             }
             "--context-dir" => {
                 index += 1;
                 let value = args
                     .get(index)
-                    .ok_or_else(|| RunError::usage("--context-dir 缺少路径。"))?;
+                    .ok_or_else(|| RunError::usage("--context-dir requires a path."))?;
                 if value.is_empty() {
-                    return Err(RunError::usage("--context-dir 路径不能为空。"));
+                    return Err(RunError::usage("--context-dir path cannot be empty."));
                 }
                 if context.directory.replace(PathBuf::from(value)).is_some() {
-                    return Err(RunError::usage("--context-dir 只能指定一次。"));
+                    return Err(RunError::usage("--context-dir can only be specified once."));
                 }
             }
             option if option.starts_with('-') => {
                 return Err(RunError::usage(format!(
-                    "未知选项“{option}”。运行 `wolf help` 查看用法。"
+                    "Unknown option '{option}'. Run `wolf help` for usage."
                 )));
             }
             value => {
                 if path.replace(PathBuf::from(value)).is_some() {
-                    return Err(RunError::usage("只能指定一个模型路径。"));
+                    return Err(RunError::usage("Only one model path can be specified."));
                 }
             }
         }
@@ -161,7 +161,7 @@ pub fn parse_chat_args(
 
     let path = path.ok_or_else(|| {
         RunError::usage(
-            "请指定一个 GGUF 模型文件。用法：wolf <模型路径> [选项]，运行 `wolf help` 查看全部选项。",
+            "Specify a GGUF model file. Usage: wolf <model-path> [options]. Run `wolf help` for all options.",
         )
     })?;
     Ok((path, options, context))
@@ -172,7 +172,7 @@ pub fn parse_context_args(
 ) -> Result<(ContextCommand, ContextCliOptions), RunError> {
     let Some(command) = args.first().map(String::as_str) else {
         return Err(RunError::usage(
-            "缺少上下文操作。用法：wolf context list | delete <名称> [--context-dir <路径>]",
+            "Missing context operation. Usage: wolf context list | delete <name> [--context-dir <path>]",
         ));
     };
     let mut context = ContextCliOptions::default();
@@ -184,20 +184,20 @@ pub fn parse_context_args(
                 index += 1;
                 let value = args
                     .get(index)
-                    .ok_or_else(|| RunError::usage("--context-dir 缺少路径。"))?;
+                    .ok_or_else(|| RunError::usage("--context-dir requires a path."))?;
                 if value.is_empty() {
-                    return Err(RunError::usage("--context-dir 路径不能为空。"));
+                    return Err(RunError::usage("--context-dir path cannot be empty."));
                 }
                 if context.directory.replace(PathBuf::from(value)).is_some() {
-                    return Err(RunError::usage("--context-dir 只能指定一次。"));
+                    return Err(RunError::usage("--context-dir can only be specified once."));
                 }
             }
             value if value.starts_with('-') => {
-                return Err(RunError::usage(format!("未知选项“{value}”。")));
+                return Err(RunError::usage(format!("Unknown option '{value}'.")));
             }
             value => {
                 if name.replace(value.to_string()).is_some() {
-                    return Err(RunError::usage("上下文操作只能指定一个名称。"));
+                    return Err(RunError::usage("Only one context name can be specified."));
                 }
             }
         }
@@ -207,13 +207,17 @@ pub fn parse_context_args(
         "list" if name.is_none() => ContextCommand::List,
         "delete" => ContextCommand::Delete(name.ok_or_else(|| {
             RunError::usage(
-                "缺少上下文名称。用法：wolf context delete <名称> [--context-dir <路径>]",
+                "Missing context name. Usage: wolf context delete <name> [--context-dir <path>]",
             )
         })?),
-        "list" => return Err(RunError::usage("wolf context list 不接受上下文名称。")),
+        "list" => {
+            return Err(RunError::usage(
+                "wolf context list does not accept a context name.",
+            ));
+        }
         other => {
             return Err(RunError::usage(format!(
-                "未知上下文操作“{other}”。可用操作：list、delete。"
+                "Unknown context operation '{other}'. Available operations: list, delete."
             )));
         }
     };
@@ -222,7 +226,7 @@ pub fn parse_context_args(
 
 pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), RunError> {
     let mut serve = ServeOptions::default();
-    let mut options = DEFAULT_CHAT_OPTIONS;
+    let mut options = ChatOptions::default();
     let mut max_concurrent_generations_specified = false;
     let mut index = 0;
     while index < args.len() {
@@ -231,13 +235,13 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
                 index += 1;
                 let value = args
                     .get(index)
-                    .ok_or_else(|| RunError::usage("--model 缺少模型名称或路径。"))?;
+                    .ok_or_else(|| RunError::usage("--model requires a model name or path."))?;
                 if value.is_empty() {
-                    return Err(RunError::usage("--model 不能为空。"));
+                    return Err(RunError::usage("--model cannot be empty."));
                 }
                 if !serve.model.is_empty() {
                     return Err(RunError::usage(
-                        "模型只能指定一次；位置参数与 --model 不能同时使用。",
+                        "Only one model can be specified; do not combine a positional argument with --model.",
                     ));
                 }
                 serve.model = value.clone();
@@ -246,9 +250,9 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
                 index += 1;
                 let value = args
                     .get(index)
-                    .ok_or_else(|| RunError::usage("--model-dir 缺少路径。"))?;
+                    .ok_or_else(|| RunError::usage("--model-dir requires a path."))?;
                 if value.is_empty() {
-                    return Err(RunError::usage("--model-dir 路径不能为空。"));
+                    return Err(RunError::usage("--model-dir path cannot be empty."));
                 }
                 serve.model_dir = PathBuf::from(value);
             }
@@ -256,9 +260,9 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
                 index += 1;
                 let value = args
                     .get(index)
-                    .ok_or_else(|| RunError::usage("--host 缺少地址。"))?;
+                    .ok_or_else(|| RunError::usage("--host requires an address."))?;
                 if value.is_empty() {
-                    return Err(RunError::usage("--host 不能为空。"));
+                    return Err(RunError::usage("--host cannot be empty."));
                 }
                 serve.host = value.clone();
             }
@@ -266,15 +270,17 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
                 index += 1;
                 let value = args
                     .get(index)
-                    .ok_or_else(|| RunError::usage("--port 缺少端口号。"))?;
+                    .ok_or_else(|| RunError::usage("--port requires a port number."))?;
                 serve.port = value.parse::<u16>().map_err(|_| {
-                    RunError::usage(format!("--port 需要 0-65535 之间的端口，收到“{value}”。"))
+                    RunError::usage(format!(
+                        "--port must be between 0 and 65535; received '{value}'."
+                    ))
                 })?;
             }
             "--max-concurrent-generations" => {
                 if max_concurrent_generations_specified {
                     return Err(RunError::usage(
-                        "--max-concurrent-generations 只能指定一次。",
+                        "--max-concurrent-generations can only be specified once.",
                     ));
                 }
                 index += 1;
@@ -284,7 +290,9 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
             }
             "--generate-key" => {
                 if serve.generate_key {
-                    return Err(RunError::usage("--generate-key 只能指定一次。"));
+                    return Err(RunError::usage(
+                        "--generate-key can only be specified once.",
+                    ));
                 }
                 serve.generate_key = true;
             }
@@ -292,12 +300,12 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
                 index += 1;
                 let value = args
                     .get(index)
-                    .ok_or_else(|| RunError::usage("--api-key 缺少密钥。"))?;
+                    .ok_or_else(|| RunError::usage("--api-key requires a key."))?;
                 if value.is_empty() {
-                    return Err(RunError::usage("--api-key 不能为空。"));
+                    return Err(RunError::usage("--api-key cannot be empty."));
                 }
                 if serve.api_key.replace(value.clone()).is_some() {
-                    return Err(RunError::usage("--api-key 只能指定一次。"));
+                    return Err(RunError::usage("--api-key can only be specified once."));
                 }
             }
             "--threads" => {
@@ -336,13 +344,13 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
             }
             option if option.starts_with('-') => {
                 return Err(RunError::usage(format!(
-                    "未知选项“{option}”。运行 `wolf help` 查看用法。"
+                    "Unknown option '{option}'. Run `wolf help` for usage."
                 )));
             }
             value => {
                 if !serve.model.is_empty() {
                     return Err(RunError::usage(
-                        "serve 只能指定一个模型名称或路径；旧写法可用 --model。",
+                        "Only one model name or path can be specified for serve; use --model for the legacy syntax.",
                     ));
                 }
                 serve.model = value.to_string();
@@ -353,12 +361,12 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
 
     if serve.model.is_empty() {
         return Err(RunError::usage(
-            "请指定模型名称或路径。用法：wolf serve <名称或路径> [选项]",
+            "Specify a model name or path. Usage: wolf serve <name-or-path> [options]",
         ));
     }
     if serve.generate_key && serve.api_key.is_some() {
         return Err(RunError::usage(
-            "--generate-key 与 --api-key 不能同时使用。",
+            "--generate-key and --api-key cannot be used together.",
         ));
     }
     Ok((serve, options))
@@ -386,23 +394,23 @@ pub fn parse_inspect_args(args: &[String]) -> Result<InspectOptions, RunError> {
             "-o" | "--output" => {
                 index += 1;
                 let value = args.get(index).ok_or_else(|| {
-                    RunError::usage(format!("{} 缺少输出文件路径。", args[index - 1]))
+                    RunError::usage(format!("{} requires an output file path.", args[index - 1]))
                 })?;
                 if value.is_empty() {
-                    return Err(RunError::usage("输出文件路径不能为空。"));
+                    return Err(RunError::usage("Output file path cannot be empty."));
                 }
                 if output.replace(PathBuf::from(value)).is_some() {
-                    return Err(RunError::usage("-o/--output 只能指定一次。"));
+                    return Err(RunError::usage("-o/--output can only be specified once."));
                 }
             }
             value if value.starts_with('-') => {
                 return Err(RunError::usage(format!(
-                    "未知选项“{value}”。运行 `wolf help` 查看用法。"
+                    "Unknown option '{value}'. Run `wolf help` for usage."
                 )));
             }
             value => {
                 if path.replace(PathBuf::from(value)).is_some() {
-                    return Err(RunError::usage("只能指定一个模型文件。"));
+                    return Err(RunError::usage("Only one model file can be specified."));
                 }
             }
         }
@@ -411,7 +419,7 @@ pub fn parse_inspect_args(args: &[String]) -> Result<InspectOptions, RunError> {
 
     let path = path.ok_or_else(|| {
         RunError::usage(
-            "缺少模型文件路径。用法：wolf inspect <模型文件> [--all] [--json] [-o <文件>]",
+            "Missing model file path. Usage: wolf inspect <model-file> [--all] [--json] [-o <file>]",
         )
     })?;
     Ok(InspectOptions {
@@ -429,12 +437,14 @@ pub fn parse_positive_option(
 ) -> Result<usize, RunError> {
     let value = args
         .get(index)
-        .ok_or_else(|| RunError::usage(format!("{option} 缺少数值。")))?;
-    let parsed = value
-        .parse::<usize>()
-        .map_err(|_| RunError::usage(format!("{option} 需要正整数，收到“{value}”。")))?;
+        .ok_or_else(|| RunError::usage(format!("{option} requires a value.")))?;
+    let parsed = value.parse::<usize>().map_err(|_| {
+        RunError::usage(format!(
+            "{option} requires a positive integer; received '{value}'."
+        ))
+    })?;
     if parsed == 0 {
-        return Err(RunError::usage(format!("{option} 必须大于 0。")));
+        return Err(RunError::usage(format!("{option} must be greater than 0.")));
     }
     Ok(parsed)
 }
@@ -446,25 +456,29 @@ pub fn parse_nonnegative_option(
 ) -> Result<usize, RunError> {
     let value = args
         .get(index)
-        .ok_or_else(|| RunError::usage(format!("{option} 缺少数值。")))?;
-    value
-        .parse::<usize>()
-        .map_err(|_| RunError::usage(format!("{option} 需要非负整数，收到“{value}”。")))
+        .ok_or_else(|| RunError::usage(format!("{option} requires a value.")))?;
+    value.parse::<usize>().map_err(|_| {
+        RunError::usage(format!(
+            "{option} requires a non-negative integer; received '{value}'."
+        ))
+    })
 }
 
 fn parse_u64_option(args: &[String], index: usize, option: &str) -> Result<u64, RunError> {
     let value = args
         .get(index)
-        .ok_or_else(|| RunError::usage(format!("{option} 缺少数值。")))?;
-    value
-        .parse::<u64>()
-        .map_err(|_| RunError::usage(format!("{option} 需要非负整数，收到“{value}”。")))
+        .ok_or_else(|| RunError::usage(format!("{option} requires a value.")))?;
+    value.parse::<u64>().map_err(|_| {
+        RunError::usage(format!(
+            "{option} requires a non-negative integer; received '{value}'."
+        ))
+    })
 }
 
 fn parse_text_option(args: &[String], index: usize, option: &str) -> Result<String, RunError> {
     args.get(index).cloned().ok_or_else(|| {
         RunError::usage(format!(
-            "{option} 缺少内容，例如 --system \"你是一个简洁的助手\"。"
+            "{option} requires a value, e.g. --system \"You are a concise assistant.\"."
         ))
     })
 }
@@ -479,7 +493,7 @@ fn parse_float_option(
     let value = parse_float_raw(args, index, option)?;
     if value < min {
         return Err(RunError::usage(format!(
-            "{option} 不能小于 {min}，收到“{value}”。"
+            "{option} must be at least {min}; received '{value}'."
         )));
     }
     Ok(value)
@@ -496,7 +510,7 @@ fn parse_bounded_float_option(
     let value = parse_float_raw(args, index, option)?;
     if !(min..=max).contains(&value) {
         return Err(RunError::usage(format!(
-            "{option} 需要介于 {min} 和 {max} 之间的数值，收到“{value}”。"
+            "{option} must be between {min} and {max}; received '{value}'."
         )));
     }
     Ok(value)
@@ -505,12 +519,12 @@ fn parse_bounded_float_option(
 fn parse_float_raw(args: &[String], index: usize, option: &str) -> Result<f64, RunError> {
     let value = args
         .get(index)
-        .ok_or_else(|| RunError::usage(format!("{option} 缺少数值。")))?;
+        .ok_or_else(|| RunError::usage(format!("{option} requires a value.")))?;
     let parsed = value
         .parse::<f64>()
-        .map_err(|_| RunError::usage(format!("{option} 需要数值，收到“{value}”。")))?;
+        .map_err(|_| RunError::usage(format!("{option} requires a number; received '{value}'.")))?;
     if parsed.is_nan() {
-        return Err(RunError::usage(format!("{option} 不能是 NaN。")));
+        return Err(RunError::usage(format!("{option} cannot be NaN.")));
     }
     Ok(parsed)
 }
@@ -535,7 +549,7 @@ mod tests {
             ChatOptions {
                 threads: Some(8),
                 max_tokens: 64,
-                ..DEFAULT_CHAT_OPTIONS
+                ..ChatOptions::default()
             }
         );
     }
@@ -555,7 +569,7 @@ mod tests {
             "--seed",
             "7",
             "--system",
-            "你是一个简洁的助手",
+            "You are a concise assistant.",
         ]);
         let (_, options, _) = parse_chat_args(&values).unwrap();
         assert_eq!(options.temperature, 0.0);
@@ -563,7 +577,10 @@ mod tests {
         assert_eq!(options.top_k, 40);
         assert_eq!(options.repeat_penalty, 1.3);
         assert_eq!(options.seed, Some(7));
-        assert_eq!(options.system.as_deref(), Some("你是一个简洁的助手"));
+        assert_eq!(
+            options.system.as_deref(),
+            Some("You are a concise assistant.")
+        );
     }
 
     #[test]
@@ -573,7 +590,10 @@ mod tests {
         assert_eq!(DEFAULT_CHAT_OPTIONS.top_k, 0);
         assert_eq!(DEFAULT_CHAT_OPTIONS.repeat_penalty, 1.0);
         assert_eq!(DEFAULT_CHAT_OPTIONS.seed, None);
-        assert_eq!(DEFAULT_CHAT_OPTIONS.system, None);
+        assert_eq!(
+            ChatOptions::default().system.as_deref(),
+            Some("You are a concise assistant. Respond in English.")
+        );
     }
 
     #[test]
@@ -599,14 +619,14 @@ mod tests {
             parse_chat_args(&values)
                 .unwrap_err()
                 .to_string()
-                .contains("必须大于 0")
+                .contains("must be greater than 0")
         );
         let values = args(&["model.gguf", "--threads"]);
         assert!(
             parse_chat_args(&values)
                 .unwrap_err()
                 .to_string()
-                .contains("缺少数值")
+                .contains("requires a value")
         );
     }
 
@@ -616,7 +636,7 @@ mod tests {
             parse_chat_args(&args(&["--max-tokens", "8"]))
                 .unwrap_err()
                 .to_string()
-                .contains("请指定")
+                .contains("Specify")
         );
     }
 
@@ -668,7 +688,7 @@ mod tests {
         assert_eq!(serve.max_concurrent_generations, 1);
         assert!(!serve.generate_key);
         assert_eq!(serve.api_key, None);
-        assert_eq!(options, DEFAULT_CHAT_OPTIONS);
+        assert_eq!(options, ChatOptions::default());
     }
 
     #[test]
@@ -727,7 +747,7 @@ mod tests {
         ]))
         .unwrap_err();
         assert!(matches!(error, RunError::Usage(_)));
-        assert!(error.to_string().contains("不能同时使用"));
+        assert!(error.to_string().contains("cannot be used together"));
     }
 
     #[test]
@@ -738,7 +758,7 @@ mod tests {
         ));
         let error = parse_serve_args(&args(&["--model", "m.gguf", "--port", "70000"])).unwrap_err();
         assert!(matches!(error, RunError::Usage(_)));
-        assert!(error.to_string().contains("0-65535"));
+        assert!(error.to_string().contains("0 and 65535"));
     }
 
     #[test]
@@ -773,7 +793,7 @@ mod tests {
         assert_eq!(serve.model, "m.gguf");
         assert_eq!(serve.model_dir, PathBuf::from("./models"));
         assert_eq!(serve.port, 9000);
-        assert_eq!(options, DEFAULT_CHAT_OPTIONS);
+        assert_eq!(options, ChatOptions::default());
     }
 
     #[test]
@@ -785,7 +805,7 @@ mod tests {
         ] {
             let error = parse_serve_args(&values).unwrap_err();
             assert!(matches!(error, RunError::Usage(_)));
-            assert!(error.to_string().contains("模型"));
+            assert!(error.to_string().contains("model"));
         }
     }
 

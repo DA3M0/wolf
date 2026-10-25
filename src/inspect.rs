@@ -60,17 +60,18 @@ impl Drop for CAllocation {
 /// Validate a GGUF or Safetensors model file and return its parsed metadata.
 pub fn inspect_model(path: &Path) -> Result<ModelInfo, String> {
     let file = std::fs::File::open(path)
-        .map_err(|error| format!("无法打开 {}：{error}", path.display()))?;
+        .map_err(|error| format!("Failed to open {}: {error}", path.display()))?;
     let mmap = unsafe {
         memmap2::MmapOptions::new()
             .map(&file)
-            .map_err(|error| format!("无法映射 {}：{error}", path.display()))?
+            .map_err(|error| format!("Failed to map {}: {error}", path.display()))?
     };
     let parsed = parse_model(&mmap)?;
     Ok(ModelInfo {
         path: path.to_path_buf(),
-        file_size: u64::try_from(mmap.len())
-            .map_err(|_| "模型文件大小超出当前平台支持范围。".to_string())?,
+        file_size: u64::try_from(mmap.len()).map_err(|_| {
+            "Model file size exceeds the range supported by this platform.".to_string()
+        })?,
         format: parsed.format,
         tensors: parsed.tensors,
         metadata: parsed.metadata,
@@ -86,17 +87,17 @@ fn parse_model(data: &[u8]) -> Result<ParsedModel, String> {
 
     if success == 0 {
         if error.0.is_null() {
-            return Err("模型文件解析失败。".to_string());
+            return Err("Failed to parse model file.".to_string());
         }
         return Err(unsafe { CStr::from_ptr(error.0) }
             .to_string_lossy()
             .into_owned());
     }
     if json.0.is_null() {
-        return Err("模型文件解析器未返回结果。".to_string());
+        return Err("Model parser returned no result.".to_string());
     }
     serde_json::from_slice(unsafe { CStr::from_ptr(json.0) }.to_bytes())
-        .map_err(|error| format!("模型解析结果无效：{error}"))
+        .map_err(|error| format!("Invalid model parse result: {error}"))
 }
 
 #[cfg(test)]
@@ -178,7 +179,11 @@ mod tests {
             r#"{"weight":{"dtype":"F32","shape":[2],"data_offsets":[0,16]}}"#,
             &[0; 4],
         );
-        assert!(parse_model(&file).unwrap_err().contains("超出文件数据区"));
+        assert!(
+            parse_model(&file)
+                .unwrap_err()
+                .contains("exceeds the file data section")
+        );
     }
 
     #[test]
@@ -202,7 +207,7 @@ mod tests {
             r#"{"a":{"dtype":"F32","shape":[2],"data_offsets":[0,8]},"b":{"dtype":"F32","shape":[2],"data_offsets":[4,12]}}"#,
             &[0; 12],
         );
-        assert!(parse_model(&file).unwrap_err().contains("重叠"));
+        assert!(parse_model(&file).unwrap_err().contains("overlap"));
     }
 
     fn gguf_file(
@@ -234,7 +239,7 @@ mod tests {
                 8 => write_string(&mut file, value),
                 11 => file.extend_from_slice(&value.parse::<i64>().unwrap().to_le_bytes()),
                 12 => file.extend_from_slice(&value.parse::<f64>().unwrap().to_le_bytes()),
-                _ => panic!("测试包含不支持的 GGUF 元数据类型"),
+                _ => panic!("Test contains an unsupported GGUF metadata type"),
             }
         }
         for (name, shape, type_id, offset) in tensors {
@@ -266,7 +271,7 @@ mod tests {
         assert!(
             parse_model(b"not a model")
                 .unwrap_err()
-                .contains("无法识别")
+                .contains("Unable to identify")
         );
     }
 
@@ -274,7 +279,11 @@ mod tests {
     fn rejects_unsupported_gguf_version() {
         let mut file = gguf_file(&[], &[], &[]);
         file[4..8].copy_from_slice(&1u32.to_le_bytes());
-        assert!(parse_model(&file).unwrap_err().contains("不支持 GGUF 版本"));
+        assert!(
+            parse_model(&file)
+                .unwrap_err()
+                .contains("Unsupported GGUF version")
+        );
     }
 
     #[test]
@@ -356,7 +365,7 @@ mod tests {
     #[test]
     fn rejects_overlapping_gguf_tensors() {
         let file = gguf_file(&[], &[("a", vec![4], 0, 0), ("b", vec![4], 0, 8)], &[0; 32]);
-        assert!(parse_model(&file).unwrap_err().contains("重叠"));
+        assert!(parse_model(&file).unwrap_err().contains("overlap"));
     }
 
     #[test]
@@ -373,6 +382,10 @@ mod tests {
     #[test]
     fn rejects_gguf_tensor_data_out_of_bounds() {
         let file = gguf_file(&[], &[("a", vec![1024], 0, 0)], &[]);
-        assert!(parse_model(&file).unwrap_err().contains("超出文件范围"));
+        assert!(
+            parse_model(&file)
+                .unwrap_err()
+                .contains("exceeds the file bounds")
+        );
     }
 }

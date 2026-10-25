@@ -34,7 +34,7 @@ impl ChatMessage {
 
     fn to_llama(&self) -> std::result::Result<LlamaChatMessage, String> {
         LlamaChatMessage::new(self.role.clone(), self.content.clone())
-            .map_err(|error| format!("无法创建“{}”消息：{error}", self.role))
+            .map_err(|error| format!("Failed to create '{}' message: {error}", self.role))
     }
 }
 
@@ -95,17 +95,17 @@ pub struct Engine {
 impl Engine {
     /// 初始化 llama.cpp、加载模型,并从对话模板探测结束标记。
     pub fn load(path: &Path, threads: Option<usize>) -> std::result::Result<Self, String> {
-        let mut backend =
-            LlamaBackend::init().map_err(|error| format!("无法初始化 llama.cpp：{error}"))?;
+        let mut backend = LlamaBackend::init()
+            .map_err(|error| format!("Failed to initialize llama.cpp: {error}"))?;
         backend.void_logs();
         let model = LlamaModel::load_from_file(&backend, path, &LlamaModelParams::default())
-            .map_err(|error| format!("无法加载 GGUF 模型：{error}"))?;
+            .map_err(|error| format!("Failed to load GGUF model: {error}"))?;
         let default_context_size = u32::try_from(DEFAULT_CONTEXT_TOKENS)
-            .map_err(|_| "上下文长度超出 llama.cpp 支持范围。".to_string())?;
+            .map_err(|_| "Context length exceeds the range supported by llama.cpp.".to_string())?;
         let context_size = default_context_size.min(model.n_ctx_train()).max(1);
         let stop_markers = detect_stop_markers(&model)?;
         let templates = ChatTemplates::from_model(&model, None)
-            .map_err(|error| format!("无法初始化模型对话模板：{error}"));
+            .map_err(|error| format!("Failed to initialize the model chat template: {error}"));
         Ok(Self {
             model,
             templates,
@@ -122,12 +122,12 @@ impl Engine {
             LlamaContextParams::default().with_n_ctx(NonZeroU32::new(self.context_size));
         if let Some(threads) = self.threads {
             let threads = i32::try_from(threads)
-                .map_err(|_| "--threads 超出 llama.cpp 支持范围。".to_string())?;
+                .map_err(|_| "--threads exceeds the range supported by llama.cpp.".to_string())?;
             context_params = context_params.with_n_threads(threads);
         }
         self.model
             .new_context(&self.backend, context_params)
-            .map_err(|error| format!("无法创建 llama.cpp 推理上下文：{error}"))
+            .map_err(|error| format!("Failed to create llama.cpp inference context: {error}"))
     }
 
     /// 应用对话模板并编码。超出上下文上限时截断最早的完整轮次。
@@ -139,8 +139,9 @@ impl Engine {
         system: Option<&str>,
         max_tokens: usize,
     ) -> std::result::Result<(Vec<LlamaToken>, usize), String> {
-        let limit = usize::try_from(self.context_size)
-            .map_err(|_| "模型上下文长度超出当前平台支持范围。".to_string())?;
+        let limit = usize::try_from(self.context_size).map_err(|_| {
+            "Model context length exceeds the range supported by this platform.".to_string()
+        })?;
         let mut dropped_turns = 0;
         loop {
             let mut prompt_messages =
@@ -148,7 +149,7 @@ impl Engine {
             if let Some(system) = system {
                 prompt_messages.push(
                     LlamaChatMessage::new("system".into(), system.into())
-                        .map_err(|error| format!("无法创建系统消息：{error}"))?,
+                        .map_err(|error| format!("Failed to create system message: {error}"))?,
                 );
             }
 
@@ -158,22 +159,22 @@ impl Engine {
             let prompt = self
                 .model
                 .apply_chat_template(None, &prompt_messages, true)
-                .map_err(|error| format!("无法应用 GGUF 对话模板：{error}"))?;
+                .map_err(|error| format!("Failed to apply GGUF chat template: {error}"))?;
             let tokens = self
                 .model
                 .str_to_token(&prompt, AddBos::Always)
-                .map_err(|error| format!("无法编码输入文本：{error}"))?;
+                .map_err(|error| format!("Failed to encode input text: {error}"))?;
             if tokens.len().saturating_add(max_tokens) <= limit {
                 return Ok((tokens, dropped_turns));
             }
             if messages.len() <= 1 {
                 return Err(format!(
-                    "单轮输入加生成预留超过模型上下文上限 {limit} tokens，请缩短输入或减少 --max-tokens。"
+                    "Input plus reserved generation tokens exceeds the model context limit of {limit}; shorten the input or reduce --max-tokens."
                 ));
             }
             messages.drain(..2);
             dropped_turns += 1;
-            eprintln!("上下文接近上限：已截断较早的对话轮次。");
+            eprintln!("Context limit nearly reached; earlier conversation turns were truncated.");
         }
     }
 
@@ -190,27 +191,30 @@ impl Engine {
             Err(error) => return Err(error.clone()),
         };
         let mut messages: Vec<serde_json::Value> = serde_json::from_str(messages_json)
-            .map_err(|error| format!("无法解析工具请求消息：{error}"))?;
-        let limit = usize::try_from(self.context_size)
-            .map_err(|_| "模型上下文长度超出当前平台支持范围。".to_string())?;
+            .map_err(|error| format!("Failed to parse tool request message: {error}"))?;
+        let limit = usize::try_from(self.context_size).map_err(|_| {
+            "Model context length exceeds the range supported by this platform.".to_string()
+        })?;
         loop {
             let messages_json = serde_json::to_string(&messages)
-                .map_err(|error| format!("无法编码工具请求消息：{error}"))?;
+                .map_err(|error| format!("Failed to encode tool request message: {error}"))?;
             let applied =
                 Self::apply_tool_chat(templates, &messages_json, tools_json, tool_choice)?;
             let tokens = self
                 .model
                 .str_to_token(&applied.prompt, AddBos::Always)
-                .map_err(|error| format!("无法编码含工具的输入文本：{error}"))?;
+                .map_err(|error| {
+                    format!("Failed to encode input text containing tools: {error}")
+                })?;
             if tokens.len().saturating_add(max_tokens) <= limit {
                 return Ok((tokens, applied));
             }
             if !drop_oldest_tool_turn(&mut messages) {
                 return Err(format!(
-                    "输入加生成预留超过模型上下文上限 {limit} tokens，请缩短对话或减少 --max-tokens。"
+                    "Input plus reserved generation tokens exceeds the model context limit of {limit}; shorten the conversation or reduce --max-tokens."
                 ));
             }
-            eprintln!("上下文接近上限：已截断较早的对话轮次。");
+            eprintln!("Context limit nearly reached; earlier conversation turns were truncated.");
         }
     }
 
@@ -231,7 +235,7 @@ impl Engine {
         let messages = Self::tool_prompt_fallback(messages_json, tools_json, tool_choice)?;
         templates
             .apply(&ChatApplyParams::new(messages))
-            .map_err(|error| format!("无法渲染工具调用提示词：{error}"))
+            .map_err(|error| format!("Failed to render tool-call prompt: {error}"))
     }
 
     fn tool_prompt_fallback(
@@ -257,12 +261,13 @@ impl Engine {
             ),
         };
         let mut messages: Vec<serde_json::Value> = serde_json::from_str(messages_json)
-            .map_err(|error| format!("无法解析工具提示词消息：{error}"))?;
+            .map_err(|error| format!("Failed to parse tool prompt message: {error}"))?;
         messages.insert(
             0,
             serde_json::json!({"role": "system", "content": instruction}),
         );
-        serde_json::to_string(&messages).map_err(|error| format!("无法编码工具提示词消息：{error}"))
+        serde_json::to_string(&messages)
+            .map_err(|error| format!("Failed to encode tool prompt messages: {error}"))
     }
 
     /// 执行一次生成,把可见文本交给 `sink`。
@@ -307,25 +312,27 @@ impl Engine {
         chat_params: Option<&ChatParams>,
     ) -> std::result::Result<Generation, String> {
         if prompt.is_empty() {
-            return Err("输入未能转换为模型 token，请重试。".into());
+            return Err("Failed to convert input to model tokens; please try again.".into());
         }
         let mut batch = LlamaBatch::new(BATCH_SIZE, 1);
         context.clear_kv_cache();
         for (chunk_index, chunk) in prompt.chunks(BATCH_SIZE).enumerate() {
             batch.clear();
             let chunk_start = chunk_index.saturating_mul(BATCH_SIZE);
-            let last_position = i32::try_from(chunk_start + chunk.len() - 1)
-                .map_err(|_| "输入 token 数超出 llama.cpp 支持范围。".to_string())?;
+            let last_position = i32::try_from(chunk_start + chunk.len() - 1).map_err(|_| {
+                "Input token count exceeds the range supported by llama.cpp.".to_string()
+            })?;
             for (offset, token) in chunk.iter().copied().enumerate() {
-                let position = i32::try_from(chunk_start + offset)
-                    .map_err(|_| "输入 token 数超出 llama.cpp 支持范围。".to_string())?;
+                let position = i32::try_from(chunk_start + offset).map_err(|_| {
+                    "Input token count exceeds the range supported by llama.cpp.".to_string()
+                })?;
                 batch
                     .add(token, position, &[0], position == last_position)
-                    .map_err(|error| format!("无法准备输入批次：{error}"))?;
+                    .map_err(|error| format!("Failed to prepare input batch: {error}"))?;
             }
             context
                 .decode(&mut batch)
-                .map_err(|error| format!("模型推理失败：{error}"))?;
+                .map_err(|error| format!("Model inference failed: {error}"))?;
         }
         let mut sampler = make_sampler(&self.model, options, chat_params)?;
         if !chat_params.is_some_and(|params| !params.grammar.is_empty()) {
@@ -342,13 +349,14 @@ impl Engine {
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut answer = String::new();
         let mut finish_reason = FinishReason::Length;
-        let mut position = i32::try_from(prompt.len())
-            .map_err(|_| "输入 token 数超出 llama.cpp 支持范围。".to_string())?;
+        let mut position = i32::try_from(prompt.len()).map_err(|_| {
+            "Input token count exceeds the range supported by llama.cpp.".to_string()
+        })?;
         let mut generated = 0usize;
 
         for _ in 0..options.max_tokens {
             if sink.interrupted() {
-                eprintln!("\n[已中断本轮生成]");
+                eprintln!("\n[Generation interrupted]");
                 finish_reason = FinishReason::Stop;
                 break;
             }
@@ -366,11 +374,13 @@ impl Engine {
             let bytes = self
                 .model
                 .token_to_bytes(token, Special::Tokenize)
-                .map_err(|error| format!("无法解码模型回答：{error}"))?;
+                .map_err(|error| format!("Failed to decode model response: {error}"))?;
             let mut text = String::with_capacity(bytes.len().saturating_mul(3).max(32));
             let (decode_result, _, _) = decoder.decode_to_string(&bytes, &mut text, false);
             if matches!(decode_result, encoding_rs::CoderResult::OutputFull) {
-                return Err("模型回答的 UTF-8 解码缓冲区不足。".to_string());
+                return Err(
+                    "UTF-8 decoding buffer is too small for the model response.".to_string()
+                );
             }
             let (text, stopped) = stop_sequence.push(&text);
             answer.push_str(&text);
@@ -384,13 +394,13 @@ impl Engine {
             batch.clear();
             batch
                 .add(token, position, &[0], true)
-                .map_err(|error| format!("无法准备生成批次：{error}"))?;
+                .map_err(|error| format!("Failed to prepare generation batch: {error}"))?;
             context
                 .decode(&mut batch)
-                .map_err(|error| format!("模型推理失败：{error}"))?;
+                .map_err(|error| format!("Model inference failed: {error}"))?;
             position = position
                 .checked_add(1)
-                .ok_or_else(|| "模型上下文位置溢出。".to_string())?;
+                .ok_or_else(|| "Model context position overflow.".to_string())?;
             if u32::try_from(position).unwrap_or(u32::MAX) >= context.n_ctx() {
                 break;
             }
@@ -399,7 +409,7 @@ impl Engine {
         let mut final_text = String::new();
         let (decode_result, _, _) = decoder.decode_to_string(&[], &mut final_text, true);
         if matches!(decode_result, encoding_rs::CoderResult::OutputFull) {
-            return Err("模型回答的 UTF-8 解码缓冲区不足。".to_string());
+            return Err("UTF-8 decoding buffer is too small for the model response.".to_string());
         }
         let (final_text, _) = stop_sequence.push(&final_text);
         answer.push_str(&final_text);
@@ -441,9 +451,9 @@ pub fn chat(
 ) -> std::result::Result<(), String> {
     let engine = Engine::load(path, options.threads)?;
     ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
-        .map_err(|error| format!("无法安装 Ctrl-C 处理器：{error}"))?;
+        .map_err(|error| format!("Failed to install Ctrl-C handler: {error}"))?;
     let mut context = engine.new_context()?;
-    println!("已加载 llama.cpp GGUF 模型。输入 /exit 退出。");
+    println!("Loaded llama.cpp GGUF model. Enter /exit to quit.");
     chat_loop(&engine, &mut context, &options, archive, store)
 }
 
@@ -465,13 +475,13 @@ impl TextSink for StdoutSink {
         self.output
             .write_all(text.as_bytes())
             .and_then(|()| self.output.flush())
-            .map_err(|error| format!("无法输出模型回答：{error}"))
+            .map_err(|error| format!("Failed to write model response: {error}"))
     }
 
     fn finish(&mut self) -> std::result::Result<(), String> {
         writeln!(self.output)
             .and_then(|()| self.output.flush())
-            .map_err(|error| format!("无法结束模型回答：{error}"))
+            .map_err(|error| format!("Failed to finish model response: {error}"))
     }
 
     fn interrupted(&mut self) -> bool {
@@ -499,42 +509,42 @@ fn chat_loop(
         print!("> ");
         io::stdout()
             .flush()
-            .map_err(|error| format!("无法显示输入提示：{error}"))?;
+            .map_err(|error| format!("Failed to display input prompt: {error}"))?;
         input.clear();
         let bytes_read = stdin
             .read_line(&mut input)
-            .map_err(|error| format!("读取输入失败：{error}"))?;
+            .map_err(|error| format!("Failed to read input: {error}"))?;
         if bytes_read == 0 {
-            println!("\n已退出。");
+            println!("\nExited.");
             return Ok(());
         }
         if INTERRUPTED.swap(false, Ordering::SeqCst) {
-            println!("（已取消输入；/exit 或 Ctrl-D 退出）");
+            println!("(Input cancelled; enter /exit or press Ctrl-D to quit)");
             continue;
         }
 
         let prompt = input.trim();
         match prompt {
             "/exit" | "/quit" => {
-                println!("已退出。");
+                println!("Exited.");
                 return Ok(());
             }
             "/clear" => {
                 messages.clear();
                 archive.turns.clear();
                 context.clear_kv_cache();
-                println!("已清空对话历史。");
+                println!("Conversation history cleared.");
                 continue;
             }
             "/save" => {
                 eprintln!(
-                    "用法：/save <名称>（名称仅可包含 ASCII 字母、数字、点、短横线和下划线）"
+                    "Usage: /save <name> (name may contain only ASCII letters, digits, periods, hyphens, and underscores)"
                 );
                 continue;
             }
             "/help" => {
                 println!(
-                    "对话内命令：\n  /save <名称>  保存当前对话\n  /clear        清空对话历史\n  /help         显示本帮助\n  /exit         退出（或 /quit、Ctrl-D）"
+                    "Chat commands:\n  /save <name>  Save the current conversation\n  /clear        Clear conversation history\n  /help         Show this help\n  /exit         Quit (or use /quit or Ctrl-D)"
                 );
                 continue;
             }
@@ -544,13 +554,13 @@ fn chat_loop(
                     let name = name.trim();
                     if name.is_empty() || name.chars().any(char::is_whitespace) {
                         eprintln!(
-                            "用法：/save <名称>（名称仅可包含 ASCII 字母、数字、点、短横线和下划线）"
+                            "Usage: /save <name> (name may contain only ASCII letters, digits, periods, hyphens, and underscores)"
                         );
                         continue;
                     }
                     archive.name = name.to_string();
                     match store.save(&archive) {
-                        Ok(()) => println!("已保存上下文“{name}”。"),
+                        Ok(()) => println!("Saved context '{name}'."),
                         Err(error) => eprintln!("{error}"),
                     }
                     continue;
@@ -563,10 +573,10 @@ fn chat_loop(
             engine.prepare(&mut messages, options.system.as_deref(), options.max_tokens)?;
         archive.turns.drain(..dropped_turns);
 
-        println!("正在处理输入并生成回答…");
+        println!("Processing input and generating a response…");
         io::stdout()
             .flush()
-            .map_err(|error| format!("无法刷新输出：{error}"))?;
+            .map_err(|error| format!("Failed to flush output: {error}"))?;
         let generation_started = Instant::now();
         let mut sink = StdoutSink::new();
         let generation = engine.generate(context, &tokens, options, &[], &mut sink)?;
@@ -578,7 +588,7 @@ fn chat_loop(
         let elapsed = generation_started.elapsed().as_secs_f64();
         if generation.generated_tokens > 0 && elapsed > 0.0 {
             eprintln!(
-                "[生成 {} tokens，{:.1} tokens/s]",
+                "[Generated {} tokens at {:.1} tokens/s]",
                 generation.generated_tokens,
                 generation.generated_tokens as f64 / elapsed
             );
@@ -591,13 +601,16 @@ fn detect_stop_markers(model: &LlamaModel) -> std::result::Result<Vec<String>, S
 
     let messages = [
         LlamaChatMessage::new("user".into(), "probe".into())
-            .map_err(|error| format!("无法创建模板检测用户消息：{error}"))?,
-        LlamaChatMessage::new("assistant".into(), PROBE.into())
-            .map_err(|error| format!("无法创建模板检测助手消息：{error}"))?,
+            .map_err(|error| format!("Failed to create template-probe user message: {error}"))?,
+        LlamaChatMessage::new("assistant".into(), PROBE.into()).map_err(|error| {
+            format!("Failed to create template-probe assistant message: {error}")
+        })?,
     ];
     let rendered = model
         .apply_chat_template(None, &messages, false)
-        .map_err(|error| format!("无法从 GGUF 对话模板检测结束标记：{error}"))?;
+        .map_err(|error| {
+            format!("Failed to detect end markers from the GGUF chat template: {error}")
+        })?;
 
     let mut markers = template_ending(&rendered, PROBE)
         .into_iter()
@@ -606,9 +619,9 @@ fn detect_stop_markers(model: &LlamaModel) -> std::result::Result<Vec<String>, S
     if end_of_turn.0 >= 0 {
         let bytes = model
             .token_to_bytes(end_of_turn, Special::Tokenize)
-            .map_err(|error| format!("无法读取模型回合结束标记：{error}"))?;
+            .map_err(|error| format!("Failed to read model turn end marker: {error}"))?;
         let marker = String::from_utf8(bytes)
-            .map_err(|error| format!("模型回合结束标记不是有效 UTF-8：{error}"))?;
+            .map_err(|error| format!("Model turn end marker is not valid UTF-8: {error}"))?;
         if !marker.is_empty() {
             markers.push(marker);
         }
@@ -726,14 +739,14 @@ fn make_sampler(
     }
     if options.top_k > 0 {
         let top_k = i32::try_from(options.top_k)
-            .map_err(|_| "--top-k 超出 llama.cpp 支持范围。".to_string())?;
+            .map_err(|_| "--top-k exceeds the range supported by llama.cpp.".to_string())?;
         samplers.push(LlamaSampler::top_k(top_k));
     }
     samplers.push(LlamaSampler::top_p(options.top_p as f32, 1));
     samplers.push(LlamaSampler::temp(options.temperature as f32));
     let seed = options.seed.unwrap_or_else(random_seed);
     let seed = u32::try_from(seed % u64::from(u32::MAX))
-        .map_err(|_| "随机种子超出 llama.cpp 支持范围。".to_string())?;
+        .map_err(|_| "Random seed exceeds the range supported by llama.cpp.".to_string())?;
     samplers.push(LlamaSampler::dist(seed));
     Ok(LlamaSampler::chain_simple(samplers))
 }
@@ -750,23 +763,28 @@ fn make_grammar_sampler(
     let mut sampler = if lazy {
         let patterns = patterns.iter().map(String::as_str).collect::<Vec<_>>();
         LlamaSampler::try_grammar_lazy_patterns(model, &params.grammar, "root", &patterns, &tokens)
-            .map_err(|error| format!("无法初始化工具调用语法约束：{error}"))?
+            .map_err(|error| {
+                format!("Failed to initialize tool-call grammar constraints: {error}")
+            })?
     } else {
-        LlamaSampler::try_grammar(model, &params.grammar, "root")
-            .map_err(|error| format!("无法初始化工具调用语法约束：{error}"))?
+        LlamaSampler::try_grammar(model, &params.grammar, "root").map_err(|error| {
+            format!("Failed to initialize tool-call grammar constraints: {error}")
+        })?
     };
 
     if !lazy {
         let generation_prompt = params.generation_prompt();
         let tokens = model
             .str_to_token(generation_prompt, AddBos::Never)
-            .map_err(|error| format!("无法编码对话模板生成前缀：{error}"))?;
+            .map_err(|error| {
+                format!("Failed to encode chat template generation prefix: {error}")
+            })?;
         let starts_with_space = generation_prompt.starts_with(char::is_whitespace);
         for (index, token) in tokens.into_iter().enumerate() {
             if index == 0 && !starts_with_space {
                 let piece = model
                     .token_to_str(token, Special::Tokenize)
-                    .map_err(|error| format!("无法读取生成前缀 token：{error}"))?;
+                    .map_err(|error| format!("Failed to read generation prefix token: {error}"))?;
                 if piece.starts_with(char::is_whitespace) {
                     continue;
                 }

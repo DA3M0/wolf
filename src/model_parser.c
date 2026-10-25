@@ -155,7 +155,7 @@ static void set_error(char **target, const char *format, ...) {
     va_end(copy);
     if (length < 0) {
         va_end(args);
-        *target = duplicate_string("解析失败。");
+        *target = duplicate_string("Parsing failed.");
         return;
     }
     message = (char *)malloc((size_t)length + 1);
@@ -163,7 +163,7 @@ static void set_error(char **target, const char *format, ...) {
         (void)vsnprintf(message, (size_t)length + 1, format, args);
     }
     va_end(args);
-    *target = message != NULL ? message : duplicate_string("内存分配失败。");
+    *target = message != NULL ? message : duplicate_string("Memory allocation failed.");
 }
 
 static int buffer_reserve(Buffer *buffer, size_t extra) {
@@ -379,7 +379,7 @@ static int valid_utf8(const uint8_t *data, size_t length) {
 static int reader_take(Reader *reader, size_t count, const uint8_t **value) {
     if (count > SIZE_MAX - reader->position ||
         reader->position + count > reader->length) {
-        set_error(&reader->error, "GGUF 文件意外结束，文件可能已损坏。");
+        set_error(&reader->error, "Unexpected end of GGUF file; the file may be corrupted.");
         return 0;
     }
     *value = reader->data + reader->position;
@@ -423,7 +423,7 @@ static int reader_u64(Reader *reader, uint64_t *value) {
 static int reader_count(Reader *reader, const char *label, uint64_t *count) {
     if (!reader_u64(reader, count)) return 0;
     if (*count > MAX_ITEMS) {
-        set_error(&reader->error, "GGUF %s数量异常：%" PRIu64 "。", label, *count);
+        set_error(&reader->error, "Invalid number of GGUF %s: %" PRIu64 ".", label, *count);
         return 0;
     }
     return 1;
@@ -435,22 +435,22 @@ static int reader_string(Reader *reader, char **value) {
     char *copy;
     if (!reader_u64(reader, &length)) return 0;
     if (length > MAX_HEADER_SIZE) {
-        set_error(&reader->error, "GGUF 字符串长度超出安全上限。");
+        set_error(&reader->error, "GGUF string length exceeds the safety limit.");
         return 0;
     }
     if (length > SIZE_MAX - 1 || !reader_take(reader, (size_t)length, &bytes)) {
         if (reader->error == NULL) {
-            set_error(&reader->error, "GGUF 字符串长度超出当前平台支持范围。");
+            set_error(&reader->error, "GGUF string length exceeds the range supported by this platform.");
         }
         return 0;
     }
     if (!valid_utf8(bytes, (size_t)length)) {
-        set_error(&reader->error, "GGUF 文件包含无效 UTF-8 字符串。");
+        set_error(&reader->error, "GGUF file contains an invalid UTF-8 string.");
         return 0;
     }
     copy = duplicate_bytes(bytes, (size_t)length);
     if (copy == NULL) {
-        set_error(&reader->error, "内存分配失败。");
+        set_error(&reader->error, "Memory allocation failed.");
         return 0;
     }
     *value = copy;
@@ -485,7 +485,7 @@ static int reader_metadata_value(Reader *reader, uint32_t type, char **value,
     uint32_t u32;
     uint64_t u64;
     if (depth > MAX_JSON_DEPTH) {
-        set_error(&reader->error, "GGUF 元数据数组嵌套过深。");
+        set_error(&reader->error, "GGUF metadata array is nested too deeply.");
         return 0;
     }
     switch (type) {
@@ -526,7 +526,7 @@ static int reader_metadata_value(Reader *reader, uint32_t type, char **value,
         uint64_t index;
         char count_text[64];
         if (!reader_u32(reader, &element_type) ||
-            !reader_count(reader, "数组元素", &count)) return 0;
+            !reader_count(reader, "array elements", &count)) return 0;
         for (index = 0; index < count; index++) {
             char *ignored = NULL;
             if (!reader_metadata_value(reader, element_type, &ignored, depth + 1)) {
@@ -535,7 +535,7 @@ static int reader_metadata_value(Reader *reader, uint32_t type, char **value,
             }
             free(ignored);
         }
-        (void)snprintf(count_text, sizeof(count_text), "[%" PRIu64 " 项]", count);
+        (void)snprintf(count_text, sizeof(count_text), "[%" PRIu64 " items]", count);
         *value = duplicate_string(count_text);
         return *value != NULL;
     }
@@ -553,7 +553,7 @@ static int reader_metadata_value(Reader *reader, uint32_t type, char **value,
         return format_integer(value, "%.17g", number);
     }
     default:
-        set_error(&reader->error, "GGUF 元数据包含未知类型 %" PRIu32 "。", type);
+        set_error(&reader->error, "GGUF metadata contains unknown type %" PRIu32 ".", type);
         return 0;
     }
 }
@@ -666,16 +666,16 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
     model->format = "GGUF";
     if (!reader_take(&reader, 4, &signature)) goto failed;
     if (memcmp(signature, "GGUF", 4) != 0) {
-        set_error(&reader.error, "GGUF 文件签名无效。");
+        set_error(&reader.error, "Invalid GGUF file signature.");
         goto failed;
     }
     if (!reader_u32(&reader, &version)) goto failed;
     if (version < 2 || version > 3) {
-        set_error(&reader.error, "不支持 GGUF 版本 %" PRIu32 "；当前支持版本 2 和 3。", version);
+        set_error(&reader.error, "Unsupported GGUF version %" PRIu32 "; supported versions are 2 and 3.", version);
         goto failed;
     }
-    if (!reader_count(&reader, "张量", &tensor_count) ||
-        !reader_count(&reader, "元数据", &metadata_count)) goto failed;
+    if (!reader_count(&reader, "tensors", &tensor_count) ||
+        !reader_count(&reader, "metadata entries", &metadata_count)) goto failed;
 
     for (index = 0; index < metadata_count; index++) {
         char *key = NULL;
@@ -696,7 +696,7 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
                 value[0] == ' ' || value[0] == '\t' || value[0] == '\r' ||
                 value[0] == '\n' || parsed == 0 ||
                 (parsed & (parsed - 1)) != 0) {
-                set_error(&reader.error, "GGUF general.alignment 值无效。");
+                set_error(&reader.error, "Invalid GGUF general.alignment value.");
                 free(key);
                 free(value);
                 goto failed;
@@ -704,7 +704,7 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
             alignment = (uint64_t)parsed;
         }
         if (!model_add_metadata(model, key, value)) {
-            set_error(&reader.error, "内存分配失败。");
+            set_error(&reader.error, "Memory allocation failed.");
             free(key);
             free(value);
             goto failed;
@@ -729,7 +729,7 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
             goto failed;
         }
         if (dimensions > 4) {
-            set_error(&reader.error, "GGUF 张量“%s”的维度数 %" PRIu32 " 超出支持范围。",
+            set_error(&reader.error, "GGUF tensor '%s' has %" PRIu32 " dimensions, exceeding the supported limit.",
                       tensor.name, dimensions);
             free(tensor.name);
             goto failed;
@@ -738,7 +738,7 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
         if (dimensions != 0) {
             tensor.shape = (uint64_t *)calloc(dimensions, sizeof(uint64_t));
             if (tensor.shape == NULL) {
-                set_error(&reader.error, "内存分配失败。");
+                set_error(&reader.error, "Memory allocation failed.");
                 free(tensor.name);
                 goto failed;
             }
@@ -757,7 +757,7 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
         }
         tensor.dtype = duplicate_string(ggml_type_name(type));
         if (tensor.dtype == NULL) {
-            set_error(&reader.error, "内存分配失败。");
+            set_error(&reader.error, "Memory allocation failed.");
             free(tensor.name);
             free(tensor.shape);
             goto failed;
@@ -766,7 +766,7 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
             for (dimension = 0; dimension < dimensions; dimension++) {
                 if (tensor.shape[dimension] != 0 &&
                     elements > UINT64_MAX / tensor.shape[dimension]) {
-                    set_error(&reader.error, "GGUF 张量“%s”的大小溢出。", tensor.name);
+                    set_error(&reader.error, "Size overflow for GGUF tensor '%s'.", tensor.name);
                     free(tensor.name);
                     free(tensor.shape);
                     free(tensor.dtype);
@@ -776,7 +776,7 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
             }
             if (elements == 0) elements = 1;
             if (elements > UINT64_MAX - (block_size - 1)) {
-                set_error(&reader.error, "GGUF 张量“%s”的大小溢出。", tensor.name);
+                set_error(&reader.error, "Size overflow for GGUF tensor '%s'.", tensor.name);
                 free(tensor.name);
                 free(tensor.shape);
                 free(tensor.dtype);
@@ -784,7 +784,7 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
             }
             elements = (elements + block_size - 1) / block_size;
             if (elements > UINT64_MAX / type_size) {
-                set_error(&reader.error, "GGUF 张量“%s”的大小溢出。", tensor.name);
+                set_error(&reader.error, "Size overflow for GGUF tensor '%s'.", tensor.name);
                 free(tensor.name);
                 free(tensor.shape);
                 free(tensor.dtype);
@@ -794,7 +794,7 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
             tensor.has_bytes = 1;
             tensor.bytes = bytes;
             if (!grow_array((void **)&ranges, &range_capacity, range_count, sizeof(Range))) {
-                set_error(&reader.error, "内存分配失败。");
+                set_error(&reader.error, "Memory allocation failed.");
                 free(tensor.name);
                 free(tensor.shape);
                 free(tensor.dtype);
@@ -803,7 +803,7 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
             ranges[range_count] = (Range){offset, offset + bytes, tensor.name, range_count};
             range_count++;
             if (offset > UINT64_MAX - bytes) {
-                set_error(&reader.error, "GGUF 张量“%s”的大小溢出。", tensor.name);
+                set_error(&reader.error, "Size overflow for GGUF tensor '%s'.", tensor.name);
                 free(tensor.name);
                 free(tensor.shape);
                 free(tensor.dtype);
@@ -812,7 +812,7 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
             ranges[range_count - 1].end = offset + bytes;
         }
         if (!model_add_tensor(model, &tensor)) {
-            set_error(&reader.error, "内存分配失败。");
+            set_error(&reader.error, "Memory allocation failed.");
             free(tensor.name);
             free(tensor.shape);
             free(tensor.dtype);
@@ -821,26 +821,26 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
     }
 
     if (!align_up((uint64_t)reader.position, alignment, &data_start)) {
-        set_error(&reader.error, "GGUF 数据区偏移溢出。");
+        set_error(&reader.error, "GGUF data section offset overflow.");
         goto failed;
     }
     if (data_start > length) {
-        set_error(&reader.error, "GGUF 张量数据区超出文件范围。");
+        set_error(&reader.error, "GGUF tensor data section exceeds the file bounds.");
         goto failed;
     }
     data_length = (uint64_t)length - data_start;
     if (range_count > 1) qsort(ranges, range_count, sizeof(Range), compare_ranges);
     for (index = 0; index < range_count; index++) {
         if (ranges[index].start > data_length) {
-            set_error(&reader.error, "GGUF 张量“%s”的数据偏移超出文件范围。", ranges[index].name);
+            set_error(&reader.error, "Data offset for GGUF tensor '%s' exceeds the file bounds.", ranges[index].name);
             goto failed;
         }
         if (ranges[index].end > data_length) {
-            set_error(&reader.error, "GGUF 张量“%s”的数据超出文件范围。", ranges[index].name);
+            set_error(&reader.error, "Data for GGUF tensor '%s' exceeds the file bounds.", ranges[index].name);
             goto failed;
         }
         if (index > 0 && ranges[index - 1].end > ranges[index].start) {
-            set_error(&reader.error, "GGUF 张量“%s”和“%s”的数据范围重叠。",
+            set_error(&reader.error, "Data ranges for GGUF tensors '%s' and '%s' overlap.",
                       ranges[index - 1].name, ranges[index].name);
             goto failed;
         }
@@ -851,7 +851,7 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
 
 failed:
     free(ranges);
-    *error = reader.error != NULL ? reader.error : duplicate_string("内存分配失败。");
+    *error = reader.error != NULL ? reader.error : duplicate_string("Memory allocation failed.");
     return 0;
 }
 
@@ -948,7 +948,7 @@ static int json_hex4(JsonReader *reader, uint32_t *value) {
 static char *json_parse_string(JsonReader *reader) {
     Buffer buffer = {0};
     if (reader->position >= reader->length || reader->data[reader->position++] != '"') {
-        set_error(&reader->error, "Safetensors 头部 JSON 无效。");
+        set_error(&reader->error, "Invalid Safetensors header JSON.");
         return NULL;
     }
     while (reader->position < reader->length) {
@@ -957,11 +957,11 @@ static char *json_parse_string(JsonReader *reader) {
             if (buffer.data == NULL) {
                 buffer.data = duplicate_string("");
             }
-            if (buffer.data == NULL) set_error(&reader->error, "内存分配失败。");
+            if (buffer.data == NULL) set_error(&reader->error, "Memory allocation failed.");
             return buffer.data;
         }
         if (ch < 0x20) {
-            set_error(&reader->error, "Safetensors 头部 JSON 无效：字符串包含控制字符。");
+            set_error(&reader->error, "Invalid Safetensors header JSON: string contains a control character.");
             free(buffer.data);
             return NULL;
         }
@@ -1023,11 +1023,11 @@ static char *json_parse_string(JsonReader *reader) {
         }
     }
 invalid_string:
-    set_error(&reader->error, "Safetensors 头部 JSON 无效：字符串未结束或转义无效。");
+    set_error(&reader->error, "Invalid Safetensors header JSON: unterminated string or invalid escape.");
     free(buffer.data);
     return NULL;
 allocation_failure:
-    set_error(&reader->error, "内存分配失败。");
+    set_error(&reader->error, "Memory allocation failed.");
     free(buffer.data);
     return NULL;
 }
@@ -1048,7 +1048,7 @@ static JsonValue *json_parse_array(JsonReader *reader) {
         if (item == NULL || !json_array_add(array, item)) {
             json_free(item);
             json_free(array);
-            if (reader->error == NULL) set_error(&reader->error, "内存分配失败。");
+            if (reader->error == NULL) set_error(&reader->error, "Memory allocation failed.");
             return NULL;
         }
         json_skip_whitespace(reader);
@@ -1061,10 +1061,10 @@ static JsonValue *json_parse_array(JsonReader *reader) {
         json_skip_whitespace(reader);
     }
     json_free(array);
-    set_error(&reader->error, "Safetensors 头部 JSON 无效：数组格式错误。");
+    set_error(&reader->error, "Invalid Safetensors header JSON: malformed array.");
     return NULL;
 allocation_failure:
-    set_error(&reader->error, "内存分配失败。");
+    set_error(&reader->error, "Memory allocation failed.");
     return NULL;
 }
 
@@ -1096,7 +1096,7 @@ static JsonValue *json_parse_object(JsonReader *reader) {
             free(key);
             json_free(item);
             json_free(object);
-            if (reader->error == NULL) set_error(&reader->error, "内存分配失败。");
+            if (reader->error == NULL) set_error(&reader->error, "Memory allocation failed.");
             return NULL;
         }
         json_skip_whitespace(reader);
@@ -1110,11 +1110,11 @@ static JsonValue *json_parse_object(JsonReader *reader) {
     }
     json_free(object);
     if (reader->error == NULL) {
-        set_error(&reader->error, "Safetensors 头部 JSON 无效：对象格式错误。");
+        set_error(&reader->error, "Invalid Safetensors header JSON: malformed object.");
     }
     return NULL;
 allocation_failure:
-    set_error(&reader->error, "内存分配失败。");
+    set_error(&reader->error, "Memory allocation failed.");
     return NULL;
 }
 
@@ -1176,10 +1176,10 @@ static JsonValue *json_parse_number(JsonReader *reader) {
     number->text[reader->position - start] = '\0';
     return number;
 invalid_number:
-    set_error(&reader->error, "Safetensors 头部 JSON 无效：数字格式错误。");
+    set_error(&reader->error, "Invalid Safetensors header JSON: malformed number.");
     return NULL;
 allocation_failure:
-    set_error(&reader->error, "内存分配失败。");
+    set_error(&reader->error, "Memory allocation failed.");
     return NULL;
 }
 
@@ -1187,12 +1187,12 @@ static JsonValue *json_parse_value(JsonReader *reader) {
     JsonValue *value;
     if (++reader->depth > MAX_JSON_DEPTH) {
         reader->depth--;
-        set_error(&reader->error, "Safetensors 头部 JSON 嵌套过深。");
+        set_error(&reader->error, "Safetensors header JSON is nested too deeply.");
         return NULL;
     }
     json_skip_whitespace(reader);
     if (reader->position >= reader->length) {
-        set_error(&reader->error, "Safetensors 头部 JSON 无效：内容不完整。");
+        set_error(&reader->error, "Invalid Safetensors header JSON: incomplete input.");
         reader->depth--;
         return NULL;
     }
@@ -1208,7 +1208,7 @@ static JsonValue *json_parse_value(JsonReader *reader) {
                 value = NULL;
             }
         } else {
-            set_error(&reader->error, "内存分配失败。");
+            set_error(&reader->error, "Memory allocation failed.");
         }
         break;
     case 't':
@@ -1217,11 +1217,11 @@ static JsonValue *json_parse_value(JsonReader *reader) {
         size_t length = strlen(literal);
         if (reader->length - reader->position < length ||
             memcmp(reader->data + reader->position, literal, length) != 0) {
-            set_error(&reader->error, "Safetensors 头部 JSON 无效：布尔值格式错误。");
+            set_error(&reader->error, "Invalid Safetensors header JSON: malformed boolean.");
             value = NULL;
         } else {
             value = json_new(JSON_BOOL);
-            if (value == NULL) set_error(&reader->error, "内存分配失败。");
+            if (value == NULL) set_error(&reader->error, "Memory allocation failed.");
             else value->boolean = literal[0] == 't';
             reader->position += length;
         }
@@ -1230,11 +1230,11 @@ static JsonValue *json_parse_value(JsonReader *reader) {
     case 'n':
         if (reader->length - reader->position < 4 ||
             memcmp(reader->data + reader->position, "null", 4) != 0) {
-            set_error(&reader->error, "Safetensors 头部 JSON 无效：null 格式错误。");
+            set_error(&reader->error, "Invalid Safetensors header JSON: malformed null.");
             value = NULL;
         } else {
             value = json_new(JSON_NULL);
-            if (value == NULL) set_error(&reader->error, "内存分配失败。");
+            if (value == NULL) set_error(&reader->error, "Memory allocation failed.");
             reader->position += 4;
         }
         break;
@@ -1243,7 +1243,7 @@ static JsonValue *json_parse_value(JsonReader *reader) {
             (reader->data[reader->position] >= '0' && reader->data[reader->position] <= '9')) {
             value = json_parse_number(reader);
         } else {
-            set_error(&reader->error, "Safetensors 头部 JSON 无效：出现意外字符。");
+            set_error(&reader->error, "Invalid Safetensors header JSON: unexpected character.");
             value = NULL;
         }
         break;
@@ -1294,7 +1294,7 @@ static int parse_safetensors(const uint8_t *data, size_t length, Model *model, c
 
     model->format = "Safetensors";
     if (length < 8) {
-        set_error(error, "Safetensors 文件缺少头部长度。");
+        set_error(error, "Safetensors file is missing the header length.");
         return 0;
     }
     header_length_u64 = 0;
@@ -1302,31 +1302,31 @@ static int parse_safetensors(const uint8_t *data, size_t length, Model *model, c
         header_length_u64 |= (uint64_t)data[index] << (index * 8);
     }
     if (header_length_u64 > SIZE_MAX) {
-        set_error(error, "Safetensors 头部长度超出当前平台支持范围。");
+        set_error(error, "Safetensors header length exceeds the range supported by this platform.");
         return 0;
     }
     header_length = (size_t)header_length_u64;
     if (header_length > MAX_HEADER_SIZE) {
-        set_error(error, "Safetensors 头部过大（%zu 字节，上限 %zu 字节）。",
+        set_error(error, "Safetensors header is too large (%zu bytes; limit: %zu bytes).",
                   header_length, MAX_HEADER_SIZE);
         return 0;
     }
     if (header_length > length - 8) {
-        set_error(error, "Safetensors 文件头部不完整。");
+        set_error(error, "Safetensors file header is incomplete.");
         return 0;
     }
     reader = (JsonReader){data + 8, header_length, 0, 0, NULL};
     root = json_parse_value(&reader);
     json_skip_whitespace(&reader);
     if (root == NULL || reader.position != reader.length) {
-        if (reader.error == NULL) set_error(&reader.error, "Safetensors 头部 JSON 无效。");
+        if (reader.error == NULL) set_error(&reader.error, "Invalid Safetensors header JSON.");
         *error = reader.error;
         json_free(root);
         return 0;
     }
     free(reader.error);
     if (root->type != JSON_OBJECT) {
-        set_error(error, "Safetensors 头部必须是 JSON 对象。");
+        set_error(error, "Safetensors header must be a JSON object.");
         json_free(root);
         return 0;
     }
@@ -1340,7 +1340,7 @@ static int parse_safetensors(const uint8_t *data, size_t length, Model *model, c
         if (key_count > 1) qsort(keys, key_count, sizeof(char *), compare_json_keys);
         for (index = 0; index < key_count; index++) {
             JsonValue *value = json_object_get(metadata, keys[index]);
-            const char *text = value->type == JSON_STRING ? value->text : "<非字符串>";
+            const char *text = value->type == JSON_STRING ? value->text : "<non-string>";
             if (!model_add_metadata(model, keys[index], text)) goto allocation_failure;
         }
         free(keys);
@@ -1375,17 +1375,17 @@ static int parse_safetensors(const uint8_t *data, size_t length, Model *model, c
         uint64_t end;
         size_t dimension;
         if (entry->type != JSON_OBJECT) {
-            set_error(error, "张量“%s”的描述无效。", name);
+            set_error(error, "Invalid description for tensor '%s'.", name);
             goto failed;
         }
         dtype_value = json_object_get(entry, "dtype");
         if (dtype_value == NULL || dtype_value->type != JSON_STRING) {
-            set_error(error, "张量“%s”缺少 dtype。", name);
+            set_error(error, "Tensor '%s' is missing dtype.", name);
             goto failed;
         }
         shape_value = json_object_get(entry, "shape");
         if (shape_value == NULL || shape_value->type != JSON_ARRAY) {
-            set_error(error, "张量“%s”缺少有效 shape。", name);
+            set_error(error, "Tensor '%s' is missing a valid shape.", name);
             goto failed;
         }
         tensor.dimensions = shape_value->count;
@@ -1396,7 +1396,7 @@ static int parse_safetensors(const uint8_t *data, size_t length, Model *model, c
         }
         for (dimension = 0; dimension < tensor.dimensions; dimension++) {
             if (!json_u64(shape_value->items[dimension], &tensor.shape[dimension])) {
-                set_error(error, "张量“%s”包含无效维度。", name);
+                set_error(error, "Tensor '%s' contains an invalid dimension.", name);
                 free(tensor.shape);
                 goto failed;
             }
@@ -1404,23 +1404,23 @@ static int parse_safetensors(const uint8_t *data, size_t length, Model *model, c
         offsets_value = json_object_get(entry, "data_offsets");
         if (offsets_value == NULL || offsets_value->type != JSON_ARRAY ||
             offsets_value->count != 2) {
-            set_error(error, "张量“%s”缺少有效 data_offsets。", name);
+            set_error(error, "Tensor '%s' is missing valid data_offsets.", name);
             free(tensor.shape);
             goto failed;
         }
         if (!json_u64(offsets_value->items[0], &start)) {
-            set_error(error, "张量“%s”的起始偏移无效。", name);
+            set_error(error, "Invalid start offset for tensor '%s'.", name);
             free(tensor.shape);
             goto failed;
         }
         if (!json_u64(offsets_value->items[1], &end)) {
-            set_error(error, "张量“%s”的结束偏移无效。", name);
+            set_error(error, "Invalid end offset for tensor '%s'.", name);
             free(tensor.shape);
             goto failed;
         }
         if (start > end || end > (uint64_t)payload_length) {
-            set_error(error, "张量“%s”的数据范围 %" PRIu64 "..%" PRIu64
-                      " 超出文件数据区（%zu 字节）。", name, start, end, payload_length);
+            set_error(error, "Data range %" PRIu64 "..%" PRIu64 " for tensor '%s' exceeds the file data section (%zu bytes).",
+                      start, end, name, payload_length);
             free(tensor.shape);
             goto failed;
         }
@@ -1442,7 +1442,7 @@ static int parse_safetensors(const uint8_t *data, size_t length, Model *model, c
     if (key_count > 1) qsort(ranges, key_count, sizeof(Range), compare_ranges);
     for (index = 1; index < key_count; index++) {
         if (ranges[index - 1].end > ranges[index].start) {
-            set_error(error, "张量“%s”和“%s”的数据范围重叠。",
+            set_error(error, "Data ranges for tensors '%s' and '%s' overlap.",
                       ranges[index - 1].name, ranges[index].name);
             goto failed;
         }
@@ -1453,7 +1453,7 @@ static int parse_safetensors(const uint8_t *data, size_t length, Model *model, c
     return 1;
 
 allocation_failure:
-    set_error(error, "内存分配失败。");
+    set_error(error, "Memory allocation failed.");
 failed:
     free(ranges);
     free(keys);
@@ -1511,7 +1511,7 @@ int wolf_parse_model(const uint8_t *data, size_t length, char **json_out, char *
     *json_out = NULL;
     *error_out = NULL;
     if (data == NULL && length != 0) {
-        *error_out = duplicate_string("模型数据指针无效。");
+        *error_out = duplicate_string("Invalid model data pointer.");
         return 0;
     }
     if (length >= 4 && memcmp(data, "GGUF", 4) == 0) {
@@ -1524,18 +1524,18 @@ int wolf_parse_model(const uint8_t *data, size_t length, char **json_out, char *
         }
         if (header_length > (uint64_t)(length - 8)) {
             *error_out = duplicate_string(
-                "无法识别文件格式；支持 GGUF 和 Safetensors（.gguf、.safetensors）。");
+                "Unable to identify file format; supported formats are GGUF and Safetensors (.gguf, .safetensors).");
             parsed = 0;
         } else {
             parsed = parse_safetensors(data, length, &model, error_out);
         }
     } else {
         *error_out = duplicate_string(
-            "文件过短或为空；支持 GGUF 和 Safetensors（.gguf、.safetensors）。");
+            "File is too short or empty; supported formats are GGUF and Safetensors (.gguf, .safetensors).");
         parsed = 0;
     }
     if (parsed && !serialize_model(&model, json_out)) {
-        *error_out = duplicate_string("内存分配失败。");
+        *error_out = duplicate_string("Memory allocation failed.");
         parsed = 0;
     }
     free_model(&model);

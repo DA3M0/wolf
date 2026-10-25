@@ -21,11 +21,14 @@ impl Drop for ServerGuard {
 #[test]
 fn serve_openai_compatible_api() {
     let Some(model_path) = std::env::var_os("WOLF_TEST_MODEL").map(PathBuf::from) else {
-        eprintln!("跳过 serve e2e 测试：未设置 WOLF_TEST_MODEL。");
+        eprintln!("Skipping serve e2e test: WOLF_TEST_MODEL is not set.");
         return;
     };
     if !model_path.is_file() {
-        panic!("WOLF_TEST_MODEL 指向的文件不存在：{}", model_path.display());
+        panic!(
+            "WOLF_TEST_MODEL points to a file that does not exist: {}",
+            model_path.display()
+        );
     }
 
     let bin = std::env!("CARGO_BIN_EXE_wolf");
@@ -46,19 +49,19 @@ fn serve_openai_compatible_api() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("启动 wolf serve 失败");
+        .expect("Failed to start wolf serve");
 
     let stdout = child.stdout.take().expect("stdout");
     let reader = BufReader::new(stdout);
     let mut port: Option<u16> = None;
     for line in reader.lines() {
-        let line = line.expect("读取 stdout");
-        if let Some(url) = line.strip_prefix("已启动服务: ") {
+        let line = line.expect("Failed to read stdout");
+        if let Some(url) = line.strip_prefix("Server started: ") {
             port = url.rsplit(':').next().and_then(|s| s.parse().ok());
             break;
         }
     }
-    let port = port.expect("未从 stdout 解析出端口");
+    let port = port.expect("Failed to parse port from stdout");
     let guard = ServerGuard(child);
 
     let base = format!("http://127.0.0.1:{port}");
@@ -66,33 +69,42 @@ fn serve_openai_compatible_api() {
 
     // health
     let (code, _) = http_get(&format!("{base}/health"), None);
-    assert_eq!(code, 200, "/health 应返回 200");
+    assert_eq!(code, 200, "/health should return 200");
 
     // auth failures
     let (code, _) = http_get(&format!("{base}/v1/models"), None);
-    assert_eq!(code, 401, "未带 API Key 应返回 401");
+    assert_eq!(code, 401, "Request without an API key should return 401");
     let (code, _) = http_get(&format!("{base}/v1/models"), Some("wrong"));
-    assert_eq!(code, 401, "错误 API Key 应返回 401");
+    assert_eq!(
+        code, 401,
+        "Request with an invalid API key should return 401"
+    );
 
     // list models
     let (code, body) = http_get(&format!("{base}/v1/models"), Some("wolf-test"));
-    assert_eq!(code, 200, "携带正确 Key 应返回 200");
-    assert!(body.contains("\"object\":\"list\""), "模型列表响应：{body}");
+    assert_eq!(code, 200, "Request with the correct key should return 200");
+    assert!(
+        body.contains("\"object\":\"list\""),
+        "Model list response: {body}"
+    );
     let listing: serde_json::Value = serde_json::from_str(http_body(&body)).unwrap();
     let model_id = listing["data"][0]["id"]
         .as_str()
-        .expect("模型列表应含 id")
+        .expect("Model list should contain an id")
         .to_string();
 
     // retrieve a single model
     let (code, body) = http_get(&format!("{base}/v1/models/{model_id}"), Some("wolf-test"));
-    assert_eq!(code, 200, "获取单个模型应返回 200：{body}");
+    assert_eq!(
+        code, 200,
+        "Retrieving a single model should return 200: {body}"
+    );
     assert!(
         body.contains("\"object\":\"model\""),
-        "单个模型响应：{body}"
+        "Single model response: {body}"
     );
     let (code, body) = http_get(&format!("{base}/v1/models/gpt-4"), Some("wolf-test"));
-    assert_eq!(code, 404, "未知模型应返回 404：{body}");
+    assert_eq!(code, 404, "Unknown model should return 404: {body}");
 
     // unknown model name is rejected
     let req = serde_json::json!({
@@ -105,7 +117,7 @@ fn serve_openai_compatible_api() {
         &req,
         Some("wolf-test"),
     );
-    assert_eq!(code, 404, "未知模型名应返回 404：{body}");
+    assert_eq!(code, 404, "Unknown model name should return 404: {body}");
 
     // chat completions non-streaming
     let req = serde_json::json!({
@@ -119,14 +131,14 @@ fn serve_openai_compatible_api() {
         &req,
         Some("wolf-test"),
     );
-    assert_eq!(code, 200, "非流式 chat 应返回 200：{body}");
+    assert_eq!(code, 200, "Non-streaming chat should return 200: {body}");
     assert!(
         body.contains("\"object\":\"chat.completion\""),
-        "非流式响应：{body}"
+        "Non-streaming response: {body}"
     );
     assert!(
         body.contains("\"role\":\"assistant\""),
-        "非流式响应应含 assistant 角色：{body}"
+        "Non-streaming response should contain the assistant role: {body}"
     );
 
     // chat completions streaming
@@ -142,11 +154,14 @@ fn serve_openai_compatible_api() {
         &req,
         Some("wolf-test"),
     );
-    assert_eq!(code, 200, "流式 chat 应返回 200：{body}");
-    assert!(body.contains("data: "), "流式响应应含 data: 行：{body}");
+    assert_eq!(code, 200, "Streaming chat should return 200: {body}");
+    assert!(
+        body.contains("data: "),
+        "Streaming response should contain a data: line: {body}"
+    );
     assert!(
         body.contains("data: [DONE]"),
-        "流式响应应以 [DONE] 结束：{body}"
+        "Streaming response should end with [DONE]: {body}"
     );
 
     // completions
@@ -156,10 +171,10 @@ fn serve_openai_compatible_api() {
         "temperature": 0
     });
     let (code, body) = http_post(&format!("{base}/v1/completions"), &req, Some("wolf-test"));
-    assert_eq!(code, 200, "completions 应返回 200：{body}");
+    assert_eq!(code, 200, "Completions should return 200: {body}");
     assert!(
         body.contains("\"object\":\"text_completion\""),
-        "completions 响应：{body}"
+        "Completions response: {body}"
     );
 
     drop(guard);
@@ -177,7 +192,7 @@ fn wait_for_ready(base: &str) {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    panic!("服务未能在 120 秒内就绪");
+    panic!("Server did not become ready within 120 seconds");
 }
 
 fn http_get(url: &str, key: Option<&str>) -> (u16, String) {
@@ -200,7 +215,7 @@ fn send_http(
     let (host, port) = host_port.rsplit_once(':').unwrap_or((host_port, "80"));
     let port = port.parse::<u16>().unwrap();
 
-    let mut stream = TcpStream::connect((host, port)).expect("连接服务失败");
+    let mut stream = TcpStream::connect((host, port)).expect("Failed to connect to server");
     let body_bytes = body.map(|b| b.to_string().into_bytes()).unwrap_or_default();
     let auth = key
         .map(|k| format!("Authorization: Bearer {k}\r\n"))
