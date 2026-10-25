@@ -143,11 +143,14 @@ pub(crate) enum ToolResponse {
 
 #[derive(Debug, Deserialize)]
 struct ParsedToolCall {
-    #[serde(default)]
-    id: Option<String>,
     #[serde(default, rename = "type")]
     kind: Option<String>,
-    function: ParsedToolCallFunction,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<Value>,
+    #[serde(default)]
+    function: Option<ParsedToolCallFunction>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -343,6 +346,43 @@ pub(crate) fn parse_tool_response(
     )
 }
 
+pub(crate) fn parse_generated_tool_calls(text: &str) -> Option<Vec<ToolCall>> {
+    let message = serde_json::from_str::<ParsedAssistantMessage>(text).ok()?;
+    let calls = message.tool_calls?;
+    if calls.is_empty() {
+        return None;
+    }
+    calls
+        .iter()
+        .map(|call| {
+            if call.kind.as_deref().is_some_and(|kind| kind != "function") {
+                return None;
+            }
+            let name = call
+                .function
+                .as_ref()
+                .map(|function| &function.name)
+                .or(call.name.as_ref())?;
+            if name.is_empty() {
+                return None;
+            }
+            let arguments = call
+                .function
+                .as_ref()
+                .map(|function| &function.arguments)
+                .or(call.arguments.as_ref())?;
+            Some(ToolCall {
+                id: tool_call_id(),
+                kind: "function",
+                function: ToolCallFunction {
+                    name: name.clone(),
+                    arguments: normalize_tool_arguments(arguments)?,
+                },
+            })
+        })
+        .collect()
+}
+
 fn convert_tool_calls(
     calls: &[ParsedToolCall],
     tools: &[ToolDefinition],
@@ -351,7 +391,11 @@ fn convert_tool_calls(
     calls
         .iter()
         .map(|call| {
-            let name = &call.function.name;
+            let name = call
+                .function
+                .as_ref()
+                .map(|function| &function.name)
+                .or(call.name.as_ref())?;
             if matches!(choice, ResolvedToolChoice::None)
                 || call.kind.as_deref().is_some_and(|kind| kind != "function")
                 || !tools.iter().any(|tool| tool.function.name == *name)
@@ -359,27 +403,30 @@ fn convert_tool_calls(
             {
                 return None;
             }
-            let arguments = match &call.function.arguments {
-                Value::String(value) => {
-                    let parsed: Value = serde_json::from_str(value).ok()?;
-                    if !parsed.is_object() {
-                        return None;
-                    }
-                    parsed
-                }
-                Value::Object(_) => call.function.arguments.clone(),
-                _ => return None,
-            };
+            let arguments = call
+                .function
+                .as_ref()
+                .map(|function| &function.arguments)
+                .or(call.arguments.as_ref())?;
             Some(ToolCall {
-                id: call.id.clone().unwrap_or_else(tool_call_id),
+                id: tool_call_id(),
                 kind: "function",
                 function: ToolCallFunction {
                     name: name.clone(),
-                    arguments: arguments.to_string(),
+                    arguments: normalize_tool_arguments(arguments)?,
                 },
             })
         })
         .collect()
+}
+
+fn normalize_tool_arguments(arguments: &Value) -> Option<String> {
+    let arguments = match arguments {
+        Value::String(value) => serde_json::from_str(value).ok()?,
+        Value::Object(_) => arguments.clone(),
+        _ => return None,
+    };
+    arguments.is_object().then(|| arguments.to_string())
 }
 
 pub(crate) fn tool_call_id() -> String {
@@ -911,6 +958,42 @@ mod tests {
             ),
             ToolResponse::Text(text) if text == "plain answer"
         ));
+    }
+
+    #[test]
+    fn parses_generated_tool_calls_in_compact_and_openai_shapes() {
+        let compact = parse_generated_tool_calls(
+            r#"{"tool_calls":[{"name":"weather","arguments":{"city":"Tokyo"}}]}"#,
+        )
+        .unwrap();
+        let openai = parse_generated_tool_calls(
+            r#"{"tool_calls":[{"type":"function","id":"ignored","function":{"name":"time","arguments":"{\"zone\":\"UTC\"}"}}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(compact[0].function.name, "weather");
+        assert_eq!(compact[0].function.arguments, r#"{"city":"Tokyo"}"#);
+        assert_eq!(openai[0].function.name, "time");
+        assert_eq!(openai[0].function.arguments, r#"{"zone":"UTC"}"#);
+        assert!(compact[0].id.starts_with("call_"));
+        assert!(openai[0].id.starts_with("call_"));
+        assert_ne!(compact[0].id, openai[0].id);
+    }
+
+    #[test]
+    fn rejects_invalid_generated_tool_calls_for_text_fallback() {
+        for text in [
+            "plain text",
+            r#"{"tool_calls":[]}"#,
+            r#"{"tool_calls":[{"name":"weather","arguments":[]}]}"#,
+            r#"{"tool_calls":[{"name":"","arguments":{}}]}"#,
+            r#"{"tool_calls":[{"type":"other","name":"weather","arguments":{}}]}"#,
+        ] {
+            assert!(
+                parse_generated_tool_calls(text).is_none(),
+                "unexpected tool call parse for {text}"
+            );
+        }
     }
 
     #[test]

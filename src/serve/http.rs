@@ -7,6 +7,7 @@ use crate::serve::queue::QueueTicket;
 use llama_cpp_4::chat::ToolChoice as LlamaToolChoice;
 use std::io::{self, Read};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::time::Duration;
 use tiny_http::{Header, Method, Request, Response, StatusCode};
@@ -101,6 +102,24 @@ pub(crate) fn handle(
                 "未找到该端点。"
             },
         ),
+    }
+}
+
+struct DisconnectSink {
+    disconnected: Arc<AtomicBool>,
+}
+
+impl TextSink for DisconnectSink {
+    fn push(&mut self, _text: &str) -> Result<(), String> {
+        if self.disconnected.load(Ordering::Relaxed) {
+            Err("客户端已断开".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn interrupted(&mut self) -> bool {
+        self.disconnected.load(Ordering::Relaxed)
     }
 }
 
@@ -348,7 +367,7 @@ fn handle_chat_completions(
                 }
             };
             let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(SSE_CHANNEL_CAPACITY);
-            let response = sse_response(rx, heartbeat_frame);
+            let response = sse_response(rx, heartbeat_frame, None);
             let gen_state = Arc::clone(&state);
             let requested_tools = tools.clone();
             std::thread::spawn(move || {
@@ -467,16 +486,11 @@ fn handle_chat_completions(
             }
         };
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(SSE_CHANNEL_CAPACITY);
-        let response = sse_response(rx, heartbeat_frame);
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let response = sse_response(rx, heartbeat_frame, Some(Arc::clone(&disconnected)));
         let gen_state = Arc::clone(&state);
         std::thread::spawn(move || {
-            let mut sink = SseSink {
-                tx,
-                id: completion_id,
-                created,
-                model: model.clone(),
-                first: true,
-            };
+            let mut sink = DisconnectSink { disconnected };
             let result = generate_chat(
                 &gen_state,
                 generation_ticket,
@@ -488,15 +502,17 @@ fn handle_chat_completions(
             );
             match result {
                 Ok(generation) => {
-                    let _ = sink.send_chunk(
-                        None,
-                        None,
-                        None,
-                        Some(generation.finish_reason.as_str().to_string()),
-                    );
-                    let _ = sink.send_done();
+                    let mut sink = SseSink::new(tx, completion_id, created, model);
+                    if let Err(err) = send_chat_generation(
+                        &mut sink,
+                        &generation.text,
+                        generation.finish_reason.as_str(),
+                    ) {
+                        eprintln!("发送 chat SSE 响应失败：{err}");
+                    }
                 }
                 Err(err) => {
+                    let sink = SseSink::new(tx, completion_id, created, model);
                     let _ = sink.send_chunk(None, None, None, Some("server_error".to_string()));
                     let _ = sink.send_done();
                     eprintln!("生成过程中出错：{err}");
@@ -516,6 +532,8 @@ fn handle_chat_completions(
             &mut sink,
         ) {
             Ok(generation) => {
+                let (content, calls, finish_reason) =
+                    chat_completion_parts(&generation.text, generation.finish_reason.as_str());
                 let body = serde_json::to_string(&ChatCompletionResponse {
                     id: completion_id,
                     object: "chat.completion",
@@ -525,10 +543,10 @@ fn handle_chat_completions(
                         index: 0,
                         message: ChoiceMessage {
                             role: "assistant",
-                            content: Some(generation.text),
-                            tool_calls: None,
+                            content,
+                            tool_calls: calls,
                         },
-                        finish_reason: generation.finish_reason.as_str().to_string(),
+                        finish_reason,
                     }],
                     usage: Usage::new(generation.prompt_tokens, generation.generated_tokens),
                 })
@@ -540,6 +558,27 @@ fn handle_chat_completions(
             }
         }
     }
+}
+
+fn chat_completion_parts(
+    text: &str,
+    finish_reason: &str,
+) -> (Option<String>, Option<Vec<ToolCall>>, String) {
+    match parse_generated_tool_calls(text) {
+        Some(calls) => (None, Some(calls), "tool_calls".to_string()),
+        None => (Some(text.to_string()), None, finish_reason.to_string()),
+    }
+}
+
+fn send_chat_generation(sink: &mut SseSink, text: &str, finish_reason: &str) -> Result<(), String> {
+    if let Some(calls) = parse_generated_tool_calls(text) {
+        sink.send_tool_calls(&calls)?;
+        sink.send_chunk(None, None, None, Some("tool_calls".to_string()))?;
+    } else {
+        sink.push(text)?;
+        sink.send_chunk(None, None, None, Some(finish_reason.to_string()))?;
+    }
+    sink.send_done()
 }
 
 fn build_tool_prompt_inputs(
@@ -855,24 +894,32 @@ impl TextSink for SseSink {
 
 // ---- SSE reader ----
 
-fn sse_response(receiver: Receiver<Vec<u8>>, heartbeat_frame: Vec<u8>) -> Response<ChannelReader> {
+fn sse_response(
+    receiver: Receiver<Vec<u8>>,
+    heartbeat_frame: Vec<u8>,
+    disconnected: Option<Arc<AtomicBool>>,
+) -> Response<ChannelReader> {
     let mut headers = cors_headers();
     headers
         .push(Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..]).expect("ssect"));
     headers.push(Header::from_bytes(&b"Cache-Control"[..], &b"no-cache"[..]).expect("ssecc"));
-    Response::new(
-        StatusCode(200),
-        headers,
-        ChannelReader::new(receiver, heartbeat_frame, SSE_HEARTBEAT_INTERVAL),
-        None,
-        None,
-    )
+    let reader = match disconnected {
+        Some(disconnected) => ChannelReader::new_with_disconnect(
+            receiver,
+            heartbeat_frame,
+            SSE_HEARTBEAT_INTERVAL,
+            disconnected,
+        ),
+        None => ChannelReader::new(receiver, heartbeat_frame, SSE_HEARTBEAT_INTERVAL),
+    };
+    Response::new(StatusCode(200), headers, reader, None, None)
 }
 
 struct ChannelReader {
     receiver: Receiver<Vec<u8>>,
     heartbeat_frame: Vec<u8>,
     heartbeat_interval: Duration,
+    disconnected: Arc<AtomicBool>,
     waiting_for_first_chunk: bool,
     current: Vec<u8>,
     offset: usize,
@@ -884,14 +931,35 @@ impl ChannelReader {
         heartbeat_frame: Vec<u8>,
         heartbeat_interval: Duration,
     ) -> Self {
+        Self::new_with_disconnect(
+            receiver,
+            heartbeat_frame,
+            heartbeat_interval,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn new_with_disconnect(
+        receiver: Receiver<Vec<u8>>,
+        heartbeat_frame: Vec<u8>,
+        heartbeat_interval: Duration,
+        disconnected: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             receiver,
             heartbeat_frame,
             heartbeat_interval,
+            disconnected,
             waiting_for_first_chunk: true,
             current: Vec::new(),
             offset: 0,
         }
+    }
+}
+
+impl Drop for ChannelReader {
+    fn drop(&mut self) {
+        self.disconnected.store(true, Ordering::Relaxed);
     }
 }
 
@@ -1024,6 +1092,18 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_sink_stops_generation_after_reader_drop() {
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let mut sink = DisconnectSink {
+            disconnected: Arc::clone(&disconnected),
+        };
+        assert!(sink.push("token").is_ok());
+        disconnected.store(true, Ordering::Relaxed);
+        assert!(sink.interrupted());
+        assert_eq!(sink.push("token"), Err("客户端已断开".to_string()));
+    }
+
+    #[test]
     fn channel_reader_sends_heartbeat_until_first_chunk() {
         let (tx, rx) = mpsc::sync_channel(1);
         let heartbeat =
@@ -1077,6 +1157,72 @@ mod tests {
             delta["tool_calls"][0]["function"]["arguments"],
             r#"{"city":"Tokyo"}"#
         );
+    }
+
+    #[test]
+    fn chat_stream_converts_complete_tool_json_instead_of_emitting_content() {
+        let (tx, rx) = mpsc::sync_channel(4);
+        let mut sink = SseSink::new(tx, "chatcmpl-test".to_string(), 1, "test".to_string());
+        let text = r#"{"tool_calls":[{"name":"weather","arguments":{"city":"Tokyo"}}]}"#;
+        send_chat_generation(&mut sink, text, "stop").unwrap();
+
+        let call_frame = rx.try_recv().unwrap();
+        let call_json = std::str::from_utf8(&call_frame[6..call_frame.len() - 2]).unwrap();
+        let call_chunk: serde_json::Value = serde_json::from_str(call_json).unwrap();
+        let delta = &call_chunk["choices"][0]["delta"];
+        assert_eq!(delta["tool_calls"][0]["type"], "function");
+        assert_eq!(delta["tool_calls"][0]["function"]["name"], "weather");
+        assert_eq!(
+            delta["tool_calls"][0]["function"]["arguments"],
+            r#"{"city":"Tokyo"}"#
+        );
+        assert!(delta.get("content").is_none());
+
+        let finish_frame = rx.try_recv().unwrap();
+        let finish_json = std::str::from_utf8(&finish_frame[6..finish_frame.len() - 2]).unwrap();
+        let finish_chunk: serde_json::Value = serde_json::from_str(finish_json).unwrap();
+        assert_eq!(finish_chunk["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(rx.try_recv().unwrap(), b"data: [DONE]\n\n");
+    }
+
+    #[test]
+    fn chat_stream_keeps_non_tool_output_as_content() {
+        let (tx, rx) = mpsc::sync_channel(4);
+        let mut sink = SseSink::new(tx, "chatcmpl-test".to_string(), 1, "test".to_string());
+        send_chat_generation(&mut sink, "plain response", "stop").unwrap();
+
+        let content_frame = rx.try_recv().unwrap();
+        let content_json = std::str::from_utf8(&content_frame[6..content_frame.len() - 2]).unwrap();
+        let content_chunk: serde_json::Value = serde_json::from_str(content_json).unwrap();
+        assert_eq!(
+            content_chunk["choices"][0]["delta"]["content"],
+            "plain response"
+        );
+
+        let finish_frame = rx.try_recv().unwrap();
+        let finish_json = std::str::from_utf8(&finish_frame[6..finish_frame.len() - 2]).unwrap();
+        let finish_chunk: serde_json::Value = serde_json::from_str(finish_json).unwrap();
+        assert_eq!(finish_chunk["choices"][0]["finish_reason"], "stop");
+        assert_eq!(rx.try_recv().unwrap(), b"data: [DONE]\n\n");
+    }
+
+    #[test]
+    fn non_stream_chat_converts_tool_json_and_falls_back_to_text() {
+        let (content, calls, finish_reason) = chat_completion_parts(
+            r#"{"tool_calls":[{"name":"weather","arguments":{"city":"Tokyo"}}]}"#,
+            "stop",
+        );
+        assert!(content.is_none());
+        assert_eq!(finish_reason, "tool_calls");
+        let calls = calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "weather");
+        assert_eq!(calls[0].function.arguments, r#"{"city":"Tokyo"}"#);
+
+        let (content, calls, finish_reason) = chat_completion_parts("plain response", "length");
+        assert_eq!(content.as_deref(), Some("plain response"));
+        assert!(calls.is_none());
+        assert_eq!(finish_reason, "length");
     }
 
     #[test]
