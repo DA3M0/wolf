@@ -9,6 +9,7 @@ use crate::options::{ChatOptions, DEFAULT_CONTEXT_TOKENS};
 use llama_cpp_4::prelude::*;
 use std::io::{self, BufRead, Write};
 use std::num::NonZeroU32;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -707,7 +708,21 @@ fn make_sampler(
     chat_params: Option<&ChatParams>,
 ) -> std::result::Result<LlamaSampler, String> {
     let grammar = match chat_params {
-        Some(params) => make_grammar_sampler(model, params)?,
+        Some(params) => {
+            match catch_unwind(AssertUnwindSafe(|| make_grammar_sampler(model, params))) {
+                Ok(Ok(grammar)) => grammar,
+                Ok(Err(error)) => {
+                    eprintln!("Warning: {error}; continuing without grammar constraints.");
+                    None
+                }
+                Err(_) => {
+                    eprintln!(
+                        "Warning: grammar sampler initialization panicked; continuing without grammar constraints."
+                    );
+                    None
+                }
+            }
+        }
         None => None,
     };
     if options.temperature < 1e-7 {

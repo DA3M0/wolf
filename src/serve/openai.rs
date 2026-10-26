@@ -347,7 +347,8 @@ pub(crate) fn parse_tool_response(
 }
 
 pub(crate) fn parse_generated_tool_calls(text: &str) -> Option<Vec<ToolCall>> {
-    let message = serde_json::from_str::<ParsedAssistantMessage>(text).ok()?;
+    let json = extract_generated_tool_call_json(text)?;
+    let message = serde_json::from_str::<ParsedAssistantMessage>(json).ok()?;
     let calls = message.tool_calls?;
     if calls.is_empty() {
         return None;
@@ -381,6 +382,23 @@ pub(crate) fn parse_generated_tool_calls(text: &str) -> Option<Vec<ToolCall>> {
             })
         })
         .collect()
+}
+
+fn extract_generated_tool_call_json(text: &str) -> Option<&str> {
+    let mut text = text.trim();
+    if let Some(body) = text.strip_prefix("```json") {
+        text = body;
+    } else if let Some(body) = text.strip_prefix("```") {
+        text = body;
+    }
+    text = text.trim();
+    if let Some(body) = text.strip_suffix("```") {
+        text = body.trim();
+    }
+
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (start <= end).then(|| &text[start..=end])
 }
 
 fn convert_tool_calls(
@@ -985,9 +1003,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_generated_tool_calls_from_fenced_json_and_surrounding_prose() {
+        let fenced = parse_generated_tool_calls(
+            "```json\n{\"tool_calls\":[{\"name\":\"weather\",\"arguments\":{\"city\":\"Tokyo\"}}]}\n```",
+        )
+        .unwrap();
+        let verbose = parse_generated_tool_calls(
+            "好的，我马上为你查询。\n{\"tool_calls\":[{\"name\":\"time\",\"arguments\":{\"zone\":\"UTC\"}}]}\n以上是结果。",
+        )
+        .unwrap();
+
+        assert_eq!(fenced[0].function.name, "weather");
+        assert_eq!(fenced[0].function.arguments, r#"{"city":"Tokyo"}"#);
+        assert_eq!(verbose[0].function.name, "time");
+        assert_eq!(verbose[0].function.arguments, r#"{"zone":"UTC"}"#);
+    }
+
+    #[test]
     fn rejects_invalid_generated_tool_calls_for_text_fallback() {
         for text in [
             "plain text",
+            "This contains no JSON object.",
             r#"{"tool_calls":[]}"#,
             r#"{"tool_calls":[{"name":"weather","arguments":[]}]}"#,
             r#"{"tool_calls":[{"name":"","arguments":{}}]}"#,
