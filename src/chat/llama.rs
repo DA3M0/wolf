@@ -11,11 +11,13 @@ use std::io::{self, BufRead, Write};
 use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 const BATCH_SIZE: usize = 512;
+const MAX_PREFIX_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const CHATML_END_MARKER: &str = "<|im_end|>";
 
 /// 一条对话消息(角色 + 文本内容)。
@@ -79,6 +81,11 @@ pub struct Generation {
     pub finish_reason: FinishReason,
 }
 
+struct PrefixSnapshot {
+    tokens: Vec<LlamaToken>,
+    state: Vec<u8>,
+}
+
 /// 已加载的 GGUF 模型及其推理配置。
 ///
 /// `LlamaModel` 是 `Send + Sync`,因此 `Engine` 可放进 `Arc` 供多个工作线程
@@ -91,6 +98,7 @@ pub struct Engine {
     stop_markers: Vec<String>,
     context_size: u32,
     threads: Option<usize>,
+    prefix_cache: Mutex<Option<PrefixSnapshot>>,
 }
 
 impl Engine {
@@ -114,6 +122,7 @@ impl Engine {
             stop_markers,
             context_size,
             threads,
+            prefix_cache: Mutex::new(None),
         })
     }
 
@@ -316,25 +325,66 @@ impl Engine {
             return Err("Failed to convert input to model tokens; please try again.".into());
         }
         let mut batch = LlamaBatch::new(BATCH_SIZE, 1);
+        let mut cache = self
+            .prefix_cache
+            .lock()
+            .map_err(|_| "Prefix cache mutex was poisoned.".to_string())?;
+        let cache_prefix_len = prompt_cache_prefix_len(
+            cache.as_ref().map(|snapshot| snapshot.tokens.as_slice()),
+            prompt,
+        );
         context.clear_kv_cache();
-        for (chunk_index, chunk) in prompt.chunks(BATCH_SIZE).enumerate() {
-            batch.clear();
-            let chunk_start = chunk_index.saturating_mul(BATCH_SIZE);
-            let last_position = i32::try_from(chunk_start + chunk.len() - 1).map_err(|_| {
-                "Input token count exceeds the range supported by llama.cpp.".to_string()
-            })?;
-            for (offset, token) in chunk.iter().copied().enumerate() {
-                let position = i32::try_from(chunk_start + offset).map_err(|_| {
-                    "Input token count exceeds the range supported by llama.cpp.".to_string()
-                })?;
-                batch
-                    .add(token, position, &[0], position == last_position)
-                    .map_err(|error| format!("Failed to prepare input batch: {error}"))?;
+        let mut reused_prefix_len = 0;
+        if cache_prefix_len > 0 {
+            if let Some(snapshot) = cache.as_ref() {
+                let bytes_read = context.state_seq_set_data(&snapshot.state, 0);
+                if bytes_read == snapshot.state.len() {
+                    reused_prefix_len = snapshot.tokens.len();
+                    eprintln!(
+                        "[CACHE HIT] Reusing KV cache for {reused_prefix_len} tokens. Skipping prefill."
+                    );
+                } else {
+                    eprintln!(
+                        "Cached KV state restore was incomplete ({bytes_read}/{} bytes); discarding the cache.",
+                        snapshot.state.len()
+                    );
+                    *cache = None;
+                    context.clear_kv_cache();
+                }
             }
-            context
-                .decode(&mut batch)
-                .map_err(|error| format!("Model inference failed: {error}"))?;
+        } else {
+            *cache = None;
         }
+        drop(cache);
+
+        let cache_target_len = prompt.len().saturating_sub(1);
+        let mut replacement_snapshot = None;
+        if cache_target_len > reused_prefix_len {
+            decode_prompt_range(
+                context,
+                &mut batch,
+                &prompt[reused_prefix_len..cache_target_len],
+                reused_prefix_len,
+            )?;
+            match capture_prefix_snapshot(context, &prompt[..cache_target_len]) {
+                Ok(snapshot) => replacement_snapshot = snapshot,
+                Err(error) => {
+                    eprintln!("Failed to capture KV prefix cache: {error}");
+                }
+            }
+            if replacement_snapshot.is_none() {
+                *self
+                    .prefix_cache
+                    .lock()
+                    .map_err(|_| "Prefix cache mutex was poisoned.".to_string())? = None;
+            }
+        }
+        decode_prompt_range(
+            context,
+            &mut batch,
+            &prompt[cache_target_len.max(reused_prefix_len)..],
+            cache_target_len.max(reused_prefix_len),
+        )?;
         let mut sampler = make_sampler(&self.model, options, chat_params)?;
         if !chat_params.is_some_and(|params| !params.grammar.is_empty()) {
             for token in prompt.iter().copied() {
@@ -419,6 +469,13 @@ impl Engine {
         answer.push_str(&remaining);
         sink.push(&remaining)?;
         sink.finish()?;
+
+        if let Some(snapshot) = replacement_snapshot {
+            *self
+                .prefix_cache
+                .lock()
+                .map_err(|_| "Prefix cache mutex was poisoned.".to_string())? = Some(snapshot);
+        }
 
         Ok(Generation {
             text: answer,
@@ -595,6 +652,78 @@ fn chat_loop(
             );
         }
     }
+}
+
+fn prompt_cache_prefix_len(cached_tokens: Option<&[LlamaToken]>, prompt: &[LlamaToken]) -> usize {
+    let Some(cached_tokens) = cached_tokens else {
+        return 0;
+    };
+    if cached_tokens.len() < prompt.len() && prompt.starts_with(cached_tokens) {
+        cached_tokens.len()
+    } else {
+        0
+    }
+}
+
+fn decode_prompt_range(
+    context: &mut LlamaContext<'_>,
+    batch: &mut LlamaBatch,
+    tokens: &[LlamaToken],
+    start_position: usize,
+) -> std::result::Result<(), String> {
+    for (chunk_index, chunk) in tokens.chunks(BATCH_SIZE).enumerate() {
+        batch.clear();
+        let chunk_start = start_position.saturating_add(chunk_index.saturating_mul(BATCH_SIZE));
+        let last_position = i32::try_from(chunk_start + chunk.len() - 1).map_err(|_| {
+            "Input token count exceeds the range supported by llama.cpp.".to_string()
+        })?;
+        for (offset, token) in chunk.iter().copied().enumerate() {
+            let position = i32::try_from(chunk_start + offset).map_err(|_| {
+                "Input token count exceeds the range supported by llama.cpp.".to_string()
+            })?;
+            batch
+                .add(token, position, &[0], position == last_position)
+                .map_err(|error| format!("Failed to prepare input batch: {error}"))?;
+        }
+        context
+            .decode(batch)
+            .map_err(|error| format!("Model inference failed: {error}"))?;
+    }
+    Ok(())
+}
+
+fn capture_prefix_snapshot(
+    context: &mut LlamaContext<'_>,
+    tokens: &[LlamaToken],
+) -> std::result::Result<Option<PrefixSnapshot>, String> {
+    if tokens.is_empty() {
+        return Ok(None);
+    }
+    let size = context.state_seq_get_size(0);
+    if !prefix_snapshot_size_allowed(size) {
+        eprintln!(
+            "KV prefix snapshot is {size} bytes, above the 256 MiB cache limit; disabling prefix cache."
+        );
+        return Ok(None);
+    }
+    if size == 0 {
+        return Err("llama.cpp reported an empty KV sequence state.".to_string());
+    }
+    let mut state = vec![0; size];
+    let written = context.state_seq_get_data(&mut state, 0);
+    if written != size {
+        return Err(format!(
+            "llama.cpp saved {written} bytes for a {size}-byte KV sequence state."
+        ));
+    }
+    Ok(Some(PrefixSnapshot {
+        tokens: tokens.to_vec(),
+        state,
+    }))
+}
+
+fn prefix_snapshot_size_allowed(size: usize) -> bool {
+    size <= MAX_PREFIX_CACHE_BYTES
 }
 
 fn detect_stop_markers(model: &LlamaModel) -> std::result::Result<Vec<String>, String> {
@@ -820,6 +949,32 @@ fn random_seed() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reuses_only_a_strict_exact_token_prefix() {
+        let cached = [LlamaToken::new(1), LlamaToken::new(2)];
+        let prompt = [LlamaToken::new(1), LlamaToken::new(2), LlamaToken::new(3)];
+        assert_eq!(prompt_cache_prefix_len(Some(&cached), &prompt), 2);
+        assert_eq!(prompt_cache_prefix_len(Some(&cached), &cached), 0);
+        assert_eq!(
+            prompt_cache_prefix_len(Some(&cached), &[LlamaToken::new(1)]),
+            0
+        );
+        assert_eq!(
+            prompt_cache_prefix_len(
+                Some(&cached),
+                &[LlamaToken::new(1), LlamaToken::new(4), LlamaToken::new(3)]
+            ),
+            0
+        );
+        assert_eq!(prompt_cache_prefix_len(None, &prompt), 0);
+    }
+
+    #[test]
+    fn limits_serialized_prefix_cache_size() {
+        assert!(prefix_snapshot_size_allowed(MAX_PREFIX_CACHE_BYTES));
+        assert!(!prefix_snapshot_size_allowed(MAX_PREFIX_CACHE_BYTES + 1));
+    }
 
     #[test]
     fn stops_on_model_end_of_turn_token_even_when_not_marked_eog() {

@@ -1,6 +1,6 @@
 [package]
 name = "wolf"
-version = "1.4.8"
+version = "1.5.0"
 edition = "2024"
 description = "Local LLM chat and model inspection CLI powered by llama.cpp"
 license = "Apache-2.0"
