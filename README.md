@@ -69,6 +69,9 @@ wolf ./models/Phi-3-mini-4k-instruct.Q4_K_M.gguf
 # Set the thread count and maximum response length per turn
 wolf ./models/model.gguf --threads 8 --max-tokens 128
 
+# Limit the serialized KV prefix cache to 128 MiB (0 disables prefix caching)
+wolf ./models/model.gguf --max-cache-mb 128
+
 # Adjust sampling: temperature 0.7, top-k 50, and a fixed, reproducible random seed
 wolf ./models/model.gguf --temperature 0.7 --top-k 50 --seed 42
 
@@ -121,6 +124,7 @@ Goodbye.
 | --- | --- | --- |
 | `--threads N` | llama.cpp default | Number of threads for GGUF inference |
 | `--max-tokens N` | 256 | Maximum number of tokens to generate per turn |
+| `--max-cache-mb N` | 256 | Maximum size in MiB of a saved KV prefix-cache snapshot; snapshots larger than the limit are not cached, and `0` disables prefix caching |
 | `--temperature F` | 0 (greedy) | Sampling temperature; values greater than 0 enable sampling, so output may differ for the same input |
 | `--top-p F` | 0.9 | Nucleus sampling threshold; applies only when `--temperature` > 0 |
 | `--top-k N` | Disabled | Number of top-k sampling candidates |
@@ -131,6 +135,8 @@ Goodbye.
 By default, wolf uses deterministic greedy decoding (temperature 0, no repetition penalty), so the same input always produces the same answer. To get more varied output, explicitly enable sampling, for example with `--temperature 0.7 --top-p 0.9`; use `--seed` to reproduce a particular generation.
 
 Generation speed statistics are written to stderr; the response text is written to stdout.
+
+`--max-cache-mb` limits the memory used by saved prefix-cache snapshots. It does not limit the inference context's KV cache or total GPU memory usage.
 
 ### 4. In-chat commands
 
@@ -215,7 +221,7 @@ Press `Ctrl-C` to stop the service.
 | `--generate-key` | Disabled | Generate an API key automatically and print it |
 | `--api-key <KEY>` | None | Specify an API key (mutually exclusive with `--generate-key`) |
 
-Service options can be combined with chat options (`--threads`, `--max-tokens`, `--temperature`, `--top-p`, `--top-k`, `--repeat-penalty`, `--seed`, `--system`) to set default sampling parameters for the service. Matching fields in a request override these defaults.
+Service options can be combined with chat options (`--threads`, `--max-tokens`, `--max-cache-mb`, `--temperature`, `--top-p`, `--top-k`, `--repeat-penalty`, `--seed`, `--system`) to set default inference and sampling parameters for the service. Matching fields in a request override these defaults.
 
 Generation requests are queued in the order they are received by the HTTP service. At most `--max-concurrent-generations` model inference requests run at once; the default value of `1` keeps requests serial. Increasing this limit may improve throughput but uses more memory and compute resources. **Warning:** each concurrent generation can significantly increase memory usage and cause memory pressure or out-of-memory failures, especially with large models or long contexts. Invalid requests are removed from the queue during validation and do not block subsequent requests.
 
