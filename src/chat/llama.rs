@@ -17,7 +17,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 const BATCH_SIZE: usize = 512;
-const MAX_PREFIX_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const CHATML_END_MARKER: &str = "<|im_end|>";
 
 /// 一条对话消息(角色 + 文本内容)。
@@ -98,12 +97,21 @@ pub struct Engine {
     stop_markers: Vec<String>,
     context_size: u32,
     threads: Option<usize>,
+    max_prefix_cache_bytes: usize,
     prefix_cache: Mutex<Option<PrefixSnapshot>>,
 }
 
 impl Engine {
     /// 初始化 llama.cpp、加载模型,并从对话模板探测结束标记。
-    pub fn load(path: &Path, threads: Option<usize>) -> std::result::Result<Self, String> {
+    pub fn load(
+        path: &Path,
+        threads: Option<usize>,
+        max_cache_mb: Option<usize>,
+    ) -> std::result::Result<Self, String> {
+        let max_prefix_cache_bytes = max_cache_mb
+            .unwrap_or(256)
+            .checked_mul(1024 * 1024)
+            .ok_or_else(|| "--max-cache-mb exceeds the supported size.".to_string())?;
         let mut backend = LlamaBackend::init()
             .map_err(|error| format!("Failed to initialize llama.cpp: {error}"))?;
         backend.void_logs();
@@ -122,6 +130,7 @@ impl Engine {
             stop_markers,
             context_size,
             threads,
+            max_prefix_cache_bytes,
             prefix_cache: Mutex::new(None),
         })
     }
@@ -366,7 +375,11 @@ impl Engine {
                 &prompt[reused_prefix_len..cache_target_len],
                 reused_prefix_len,
             )?;
-            match capture_prefix_snapshot(context, &prompt[..cache_target_len]) {
+            match capture_prefix_snapshot(
+                context,
+                &prompt[..cache_target_len],
+                self.max_prefix_cache_bytes,
+            ) {
                 Ok(snapshot) => replacement_snapshot = snapshot,
                 Err(error) => {
                     eprintln!("Failed to capture KV prefix cache: {error}");
@@ -404,11 +417,14 @@ impl Engine {
             "Input token count exceeds the range supported by llama.cpp.".to_string()
         })?;
         let mut generated = 0usize;
+        let mut interrupted = false;
 
         for _ in 0..options.max_tokens {
             if sink.interrupted() {
                 eprintln!("\n[Generation interrupted]");
                 finish_reason = FinishReason::Stop;
+                interrupted = true;
+                context.clear_kv_cache();
                 break;
             }
             let token = sampler.sample(context, batch.n_tokens() - 1);
@@ -470,11 +486,13 @@ impl Engine {
         sink.push(&remaining)?;
         sink.finish()?;
 
-        if let Some(snapshot) = replacement_snapshot {
-            *self
-                .prefix_cache
-                .lock()
-                .map_err(|_| "Prefix cache mutex was poisoned.".to_string())? = Some(snapshot);
+        if !interrupted {
+            if let Some(snapshot) = replacement_snapshot {
+                *self
+                    .prefix_cache
+                    .lock()
+                    .map_err(|_| "Prefix cache mutex was poisoned.".to_string())? = Some(snapshot);
+            }
         }
 
         Ok(Generation {
@@ -507,7 +525,7 @@ pub fn chat(
     archive: ContextArchive,
     store: ContextStore,
 ) -> std::result::Result<(), String> {
-    let engine = Engine::load(path, options.threads)?;
+    let engine = Engine::load(path, options.threads, options.max_cache_mb)?;
     ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
         .map_err(|error| format!("Failed to install Ctrl-C handler: {error}"))?;
     let mut context = engine.new_context()?;
@@ -695,14 +713,15 @@ fn decode_prompt_range(
 fn capture_prefix_snapshot(
     context: &mut LlamaContext<'_>,
     tokens: &[LlamaToken],
+    max_bytes: usize,
 ) -> std::result::Result<Option<PrefixSnapshot>, String> {
     if tokens.is_empty() {
         return Ok(None);
     }
     let size = context.state_seq_get_size(0);
-    if !prefix_snapshot_size_allowed(size) {
+    if !prefix_snapshot_size_allowed(size, max_bytes) {
         eprintln!(
-            "KV prefix snapshot is {size} bytes, above the 256 MiB cache limit; disabling prefix cache."
+            "KV prefix snapshot is {size} bytes, above the configured {max_bytes}-byte cache limit; disabling prefix cache."
         );
         return Ok(None);
     }
@@ -722,8 +741,8 @@ fn capture_prefix_snapshot(
     }))
 }
 
-fn prefix_snapshot_size_allowed(size: usize) -> bool {
-    size <= MAX_PREFIX_CACHE_BYTES
+fn prefix_snapshot_size_allowed(size: usize, max_bytes: usize) -> bool {
+    size <= max_bytes
 }
 
 fn detect_stop_markers(model: &LlamaModel) -> std::result::Result<Vec<String>, String> {
@@ -972,8 +991,15 @@ mod tests {
 
     #[test]
     fn limits_serialized_prefix_cache_size() {
-        assert!(prefix_snapshot_size_allowed(MAX_PREFIX_CACHE_BYTES));
-        assert!(!prefix_snapshot_size_allowed(MAX_PREFIX_CACHE_BYTES + 1));
+        assert!(prefix_snapshot_size_allowed(
+            256 * 1024 * 1024,
+            256 * 1024 * 1024
+        ));
+        assert!(!prefix_snapshot_size_allowed(
+            256 * 1024 * 1024 + 1,
+            256 * 1024 * 1024
+        ));
+        assert!(!prefix_snapshot_size_allowed(1, 0));
     }
 
     #[test]

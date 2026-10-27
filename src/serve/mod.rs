@@ -34,7 +34,7 @@ pub fn serve(options: ServeOptions, chat_options: ChatOptions) -> Result<(), Str
     chat::configure_threads(chat_options.threads)?;
     eprintln!("Loading model: {}", model_path.display());
 
-    let engine = Engine::load(&model_path, chat_options.threads)?;
+    let engine = Engine::load(&model_path, chat_options.threads, chat_options.max_cache_mb)?;
     let api_key = resolve_api_key(&options)?;
 
     let addr = format!("{}:{}", options.host, options.port);

@@ -94,6 +94,12 @@ pub fn parse_chat_args(
                 options.max_tokens = parse_positive_option(args, index, "--max-tokens")?;
                 context.chat_options_specified = true;
             }
+            "--max-cache-mb" => {
+                index += 1;
+                options.max_cache_mb =
+                    Some(parse_nonnegative_option(args, index, "--max-cache-mb")?);
+                context.chat_options_specified = true;
+            }
             "--temperature" => {
                 index += 1;
                 options.temperature = parse_float_option(args, index, "--temperature", 0.0)?;
@@ -315,6 +321,11 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
             "--max-tokens" => {
                 index += 1;
                 options.max_tokens = parse_positive_option(args, index, "--max-tokens")?;
+            }
+            "--max-cache-mb" => {
+                index += 1;
+                options.max_cache_mb =
+                    Some(parse_nonnegative_option(args, index, "--max-cache-mb")?);
             }
             "--temperature" => {
                 index += 1;
@@ -540,7 +551,15 @@ mod tests {
 
     #[test]
     fn parses_chat_speed_options() {
-        let values = args(&["model.gguf", "--threads", "8", "--max-tokens", "64"]);
+        let values = args(&[
+            "model.gguf",
+            "--threads",
+            "8",
+            "--max-tokens",
+            "64",
+            "--max-cache-mb",
+            "128",
+        ]);
         let (path, options, context) = parse_chat_args(&values).unwrap();
         assert_eq!(path, PathBuf::from("model.gguf"));
         assert!(context.chat_options_specified);
@@ -549,6 +568,7 @@ mod tests {
             ChatOptions {
                 threads: Some(8),
                 max_tokens: 64,
+                max_cache_mb: Some(128),
                 ..ChatOptions::default()
             }
         );
@@ -627,6 +647,13 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("requires a value")
+        );
+        assert_eq!(
+            parse_chat_args(&args(&["model.gguf", "--max-cache-mb", "0"]))
+                .unwrap()
+                .1
+                .max_cache_mb,
+            Some(0)
         );
     }
 
@@ -710,6 +737,8 @@ mod tests {
             "0.7",
             "--max-tokens",
             "512",
+            "--max-cache-mb",
+            "64",
         ]))
         .unwrap();
         assert_eq!(serve.model_dir, PathBuf::from("./models"));
@@ -720,6 +749,7 @@ mod tests {
         assert!(!serve.generate_key);
         assert_eq!(options.temperature, 0.7);
         assert_eq!(options.max_tokens, 512);
+        assert_eq!(options.max_cache_mb, Some(64));
     }
 
     #[test]

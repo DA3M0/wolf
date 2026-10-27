@@ -160,6 +160,7 @@ Usage:\n\
 Chat options:\n\
   --threads N          Number of inference threads (backend default)\n\
   --max-tokens N       Maximum tokens to generate per turn (default: 256)\n\
+  --max-cache-mb N     Maximum KV prefix cache size in MiB (default: 256; 0 disables)\n\
   --temperature F      Sampling temperature (default: 0, deterministic; around 0.8 for varied output)\n\
   --top-p F            Nucleus sampling threshold (default: 0.9; only used when temperature > 0)\n\
   --top-k N            Number of top-k sampling candidates (default: disabled)\n\

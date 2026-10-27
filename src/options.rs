@@ -13,6 +13,8 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a concise assistant. Respond in
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatOptions {
     pub threads: Option<usize>,
+    #[serde(default)]
+    pub max_cache_mb: Option<usize>,
     pub max_tokens: usize,
     /// 采样温度;0 表示关闭采样,使用确定性贪心。
     pub temperature: f64,
@@ -39,6 +41,7 @@ impl Default for ChatOptions {
 
 pub const DEFAULT_CHAT_OPTIONS: ChatOptions = ChatOptions {
     threads: None,
+    max_cache_mb: None,
     max_tokens: DEFAULT_MAX_TOKENS_PER_TURN,
     temperature: DEFAULT_TEMPERATURE,
     top_p: DEFAULT_TOP_P,
