@@ -43,6 +43,8 @@ fn serve_openai_compatible_api() {
             "wolf-test",
             "--max-tokens",
             "32",
+            "--ctx-size",
+            "64",
             "--temperature",
             "0",
         ])
@@ -140,6 +142,20 @@ fn serve_openai_compatible_api() {
         body.contains("\"role\":\"assistant\""),
         "Non-streaming response should contain the assistant role: {body}"
     );
+
+    // Oversized prompts are rejected before streaming starts or llama.cpp is called.
+    let req = serde_json::json!({
+        "model": model_id,
+        "messages": [{"role": "user", "content": "oversized prompt ".repeat(100)}],
+        "max_tokens": 16,
+        "stream": true
+    });
+    let (code, body) = http_post(
+        &format!("{base}/v1/chat/completions"),
+        &req,
+        Some("wolf-test"),
+    );
+    assert_eq!(code, 400, "Oversized prompt should return 400: {body}");
 
     // chat completions streaming
     let req = serde_json::json!({

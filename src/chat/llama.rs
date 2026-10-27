@@ -5,7 +5,7 @@
 //! owns the model and hands generated text to a [`TextSink`].
 
 use crate::context::{ContextArchive, ContextStore, ConversationTurn};
-use crate::options::{ChatOptions, DEFAULT_CONTEXT_TOKENS};
+use crate::options::ChatOptions;
 use llama_cpp_4::prelude::*;
 use std::io::{self, BufRead, Write};
 use std::num::NonZeroU32;
@@ -107,19 +107,22 @@ impl Engine {
         path: &Path,
         threads: Option<usize>,
         max_cache_mb: Option<usize>,
+        ctx_size: usize,
     ) -> std::result::Result<Self, String> {
         let max_prefix_cache_bytes = max_cache_mb
             .unwrap_or(256)
             .checked_mul(1024 * 1024)
             .ok_or_else(|| "--max-cache-mb exceeds the supported size.".to_string())?;
+        let context_size = u32::try_from(ctx_size)
+            .map_err(|_| "Context length exceeds the range supported by llama.cpp.".to_string())?;
+        if context_size == 0 {
+            return Err("--ctx-size must be greater than 0.".to_string());
+        }
         let mut backend = LlamaBackend::init()
             .map_err(|error| format!("Failed to initialize llama.cpp: {error}"))?;
         backend.void_logs();
         let model = LlamaModel::load_from_file(&backend, path, &LlamaModelParams::default())
             .map_err(|error| format!("Failed to load GGUF model: {error}"))?;
-        let default_context_size = u32::try_from(DEFAULT_CONTEXT_TOKENS)
-            .map_err(|_| "Context length exceeds the range supported by llama.cpp.".to_string())?;
-        let context_size = default_context_size.min(model.n_ctx_train()).max(1);
         let stop_markers = detect_stop_markers(&model)?;
         let templates = ChatTemplates::from_model(&model, None)
             .map_err(|error| format!("Failed to initialize the model chat template: {error}"));
@@ -330,6 +333,14 @@ impl Engine {
         sink: &mut dyn TextSink,
         chat_params: Option<&ChatParams>,
     ) -> std::result::Result<Generation, String> {
+        let limit = usize::try_from(context.n_ctx()).map_err(|_| {
+            "Model context length exceeds the range supported by this platform.".to_string()
+        })?;
+        if prompt.len().saturating_add(options.max_tokens) > limit {
+            return Err(format!(
+                "Input plus reserved generation tokens exceeds the model context limit of {limit}; shorten the input or reduce --max-tokens."
+            ));
+        }
         if prompt.is_empty() {
             return Err("Failed to convert input to model tokens; please try again.".into());
         }
@@ -525,7 +536,12 @@ pub fn chat(
     archive: ContextArchive,
     store: ContextStore,
 ) -> std::result::Result<(), String> {
-    let engine = Engine::load(path, options.threads, options.max_cache_mb)?;
+    let engine = Engine::load(
+        path,
+        options.threads,
+        options.max_cache_mb,
+        options.ctx_size,
+    )?;
     ctrlc::set_handler(|| INTERRUPTED.store(true, Ordering::SeqCst))
         .map_err(|error| format!("Failed to install Ctrl-C handler: {error}"))?;
     let mut context = engine.new_context()?;

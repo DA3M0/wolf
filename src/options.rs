@@ -3,16 +3,22 @@
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_MAX_TOKENS_PER_TURN: usize = 256;
-pub const DEFAULT_CONTEXT_TOKENS: usize = 4096;
+pub const DEFAULT_CONTEXT_TOKENS: usize = 8192;
 /// 默认温度 0:确定性贪心输出;需要更多样化的回答时显式开启采样。
 pub const DEFAULT_TEMPERATURE: f64 = 0.0;
 pub const DEFAULT_TOP_P: f64 = 0.9;
 pub const DEFAULT_REPEAT_PENALTY: f32 = 1.0;
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a concise assistant. Respond in English.";
 
+fn default_context_tokens() -> usize {
+    DEFAULT_CONTEXT_TOKENS
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatOptions {
     pub threads: Option<usize>,
+    #[serde(default = "default_context_tokens")]
+    pub ctx_size: usize,
     #[serde(default)]
     pub max_cache_mb: Option<usize>,
     pub max_tokens: usize,
@@ -41,6 +47,7 @@ impl Default for ChatOptions {
 
 pub const DEFAULT_CHAT_OPTIONS: ChatOptions = ChatOptions {
     threads: None,
+    ctx_size: DEFAULT_CONTEXT_TOKENS,
     max_cache_mb: None,
     max_tokens: DEFAULT_MAX_TOKENS_PER_TURN,
     temperature: DEFAULT_TEMPERATURE,

@@ -94,6 +94,11 @@ pub fn parse_chat_args(
                 options.max_tokens = parse_positive_option(args, index, "--max-tokens")?;
                 context.chat_options_specified = true;
             }
+            "--ctx-size" => {
+                index += 1;
+                options.ctx_size = parse_positive_option(args, index, "--ctx-size")?;
+                context.chat_options_specified = true;
+            }
             "--max-cache-mb" => {
                 index += 1;
                 options.max_cache_mb =
@@ -321,6 +326,10 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
             "--max-tokens" => {
                 index += 1;
                 options.max_tokens = parse_positive_option(args, index, "--max-tokens")?;
+            }
+            "--ctx-size" => {
+                index += 1;
+                options.ctx_size = parse_positive_option(args, index, "--ctx-size")?;
             }
             "--max-cache-mb" => {
                 index += 1;
@@ -557,6 +566,8 @@ mod tests {
             "8",
             "--max-tokens",
             "64",
+            "--ctx-size",
+            "16384",
             "--max-cache-mb",
             "128",
         ]);
@@ -568,6 +579,7 @@ mod tests {
             ChatOptions {
                 threads: Some(8),
                 max_tokens: 64,
+                ctx_size: 16384,
                 max_cache_mb: Some(128),
                 ..ChatOptions::default()
             }
@@ -605,6 +617,7 @@ mod tests {
 
     #[test]
     fn defaults_are_deterministic() {
+        assert_eq!(DEFAULT_CHAT_OPTIONS.ctx_size, 8192);
         assert_eq!(DEFAULT_CHAT_OPTIONS.temperature, 0.0);
         assert_eq!(DEFAULT_CHAT_OPTIONS.top_p, 0.9);
         assert_eq!(DEFAULT_CHAT_OPTIONS.top_k, 0);
@@ -654,6 +667,12 @@ mod tests {
                 .1
                 .max_cache_mb,
             Some(0)
+        );
+        assert!(
+            parse_chat_args(&args(&["model.gguf", "--ctx-size", "0"]))
+                .unwrap_err()
+                .to_string()
+                .contains("must be greater than 0")
         );
     }
 
@@ -739,6 +758,8 @@ mod tests {
             "512",
             "--max-cache-mb",
             "64",
+            "--ctx-size",
+            "16384",
         ]))
         .unwrap();
         assert_eq!(serve.model_dir, PathBuf::from("./models"));
@@ -749,6 +770,7 @@ mod tests {
         assert!(!serve.generate_key);
         assert_eq!(options.temperature, 0.7);
         assert_eq!(options.max_tokens, 512);
+        assert_eq!(options.ctx_size, 16384);
         assert_eq!(options.max_cache_mb, Some(64));
     }
 

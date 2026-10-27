@@ -63,6 +63,7 @@ impl ContextArchive {
         }
         validate_name(&self.name)?;
         if self.options.max_tokens == 0
+            || self.options.ctx_size == 0
             || self.options.threads == Some(0)
             || !self.options.temperature.is_finite()
             || self.options.temperature < 0.0
@@ -430,6 +431,14 @@ mod tests {
                 .contains("unsupported")
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn older_archives_default_context_size_to_8192() {
+        let mut options = serde_json::to_value(DEFAULT_CHAT_OPTIONS).unwrap();
+        options.as_object_mut().unwrap().remove("ctx_size");
+        let restored: ChatOptions = serde_json::from_value(options).unwrap();
+        assert_eq!(restored.ctx_size, crate::options::DEFAULT_CONTEXT_TOKENS);
     }
 
     #[test]

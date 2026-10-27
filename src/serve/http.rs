@@ -1,10 +1,11 @@
 //! HTTP routing, authentication and streaming glue for `wolf serve`.
 
-use crate::chat::{ChatMessage, Engine, Generation, TextSink};
+use crate::chat::{Engine, Generation, TextSink};
 use crate::options::ChatOptions;
 use crate::serve::openai::{self, *};
-use crate::serve::queue::QueueTicket;
+use crate::serve::queue::{QueueGuard, QueueTicket};
 use llama_cpp_4::chat::ToolChoice as LlamaToolChoice;
+use llama_cpp_4::prelude::{ChatParams, LlamaToken};
 use std::io::{self, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -361,6 +362,26 @@ fn handle_chat_completions(
                 return;
             }
         };
+        let guard = generation_ticket.acquire();
+        let llama_choice = match tool_choice {
+            ResolvedToolChoice::Auto => LlamaToolChoice::Auto,
+            ResolvedToolChoice::None => LlamaToolChoice::None,
+            ResolvedToolChoice::Required | ResolvedToolChoice::Named(_) => {
+                LlamaToolChoice::Required
+            }
+        };
+        let (tokens, chat_params) = match state.engine.prepare_tool_chat(
+            &messages_json,
+            &tools_json,
+            llama_choice,
+            options.max_tokens,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                respond_error(request, prompt_error_status(&error), &error);
+                return;
+            }
+        };
         if api_request.stream {
             let heartbeat_frame = match sse_frame(
                 &completion_id,
@@ -384,10 +405,10 @@ fn handle_chat_completions(
             std::thread::spawn(move || {
                 let result = generate_tool_chat(
                     &gen_state,
-                    generation_ticket,
+                    guard,
                     ToolChatInput {
-                        messages_json: &messages_json,
-                        tools_json: &tools_json,
+                        tokens,
+                        chat_params,
                         tools: &requested_tools,
                         choice: &tool_choice,
                         options: &options,
@@ -436,10 +457,10 @@ fn handle_chat_completions(
         } else {
             match generate_tool_chat(
                 &state,
-                generation_ticket,
+                guard,
                 ToolChatInput {
-                    messages_json: &messages_json,
-                    tools_json: &tools_json,
+                    tokens,
+                    chat_params,
                     tools,
                     choice: &tool_choice,
                     options: &options,
@@ -480,6 +501,19 @@ fn handle_chat_completions(
         return;
     }
 
+    let guard = generation_ticket.acquire();
+    let mut messages = prepared.messages;
+    let tokens = match state
+        .engine
+        .prepare(&mut messages, system.as_deref(), options.max_tokens)
+    {
+        Ok((tokens, _)) => tokens,
+        Err(error) => {
+            respond_error(request, prompt_error_status(&error), &error);
+            return;
+        }
+    };
+
     if api_request.stream {
         let heartbeat_frame = match sse_frame(
             &completion_id,
@@ -502,15 +536,7 @@ fn handle_chat_completions(
         let gen_state = Arc::clone(&state);
         std::thread::spawn(move || {
             let mut sink = DisconnectSink { disconnected };
-            let result = generate_chat(
-                &gen_state,
-                generation_ticket,
-                system,
-                prepared.messages,
-                &options,
-                &stop,
-                &mut sink,
-            );
+            let result = generate_chat(&gen_state, guard, tokens, &options, &stop, &mut sink);
             match result {
                 Ok(generation) => {
                     let mut sink = SseSink::new(tx, completion_id, created, model);
@@ -533,15 +559,7 @@ fn handle_chat_completions(
         let _ = request.respond(response);
     } else {
         let mut sink = NullSink;
-        match generate_chat(
-            &state,
-            generation_ticket,
-            system,
-            prepared.messages,
-            &options,
-            &stop,
-            &mut sink,
-        ) {
+        match generate_chat(&state, guard, tokens, &options, &stop, &mut sink) {
             Ok(generation) => {
                 let (content, calls, finish_reason) =
                     chat_completion_parts(&generation.text, generation.finish_reason.as_str());
@@ -631,8 +649,8 @@ fn build_tool_prompt_inputs(
 }
 
 struct ToolChatInput<'a> {
-    messages_json: &'a str,
-    tools_json: &'a str,
+    tokens: Vec<LlamaToken>,
+    chat_params: ChatParams,
     tools: &'a [ToolDefinition],
     choice: &'a ResolvedToolChoice,
     options: &'a ChatOptions,
@@ -641,36 +659,26 @@ struct ToolChatInput<'a> {
 
 fn generate_tool_chat(
     state: &ServerState,
-    ticket: QueueTicket,
+    _guard: QueueGuard,
     input: ToolChatInput<'_>,
 ) -> Result<(Generation, ToolResponse), String> {
-    let _guard = ticket.acquire();
     let mut context = state.engine.new_context()?;
-    let llama_choice = match input.choice {
-        ResolvedToolChoice::Auto => LlamaToolChoice::Auto,
-        ResolvedToolChoice::None => LlamaToolChoice::None,
-        ResolvedToolChoice::Required | ResolvedToolChoice::Named(_) => LlamaToolChoice::Required,
-    };
-    let (tokens, chat_params) = state.engine.prepare_tool_chat(
-        input.messages_json,
-        input.tools_json,
-        llama_choice,
-        input.options.max_tokens,
-    )?;
     let mut stop = input.stop.to_vec();
-    let template_stops: Vec<String> = serde_json::from_str(&chat_params.additional_stops_json)
-        .map_err(|error| format!("Failed to parse template stop markers: {error}"))?;
+    let template_stops: Vec<String> =
+        serde_json::from_str(&input.chat_params.additional_stops_json)
+            .map_err(|error| format!("Failed to parse template stop markers: {error}"))?;
     stop.extend(template_stops);
     let mut sink = NullSink;
     let generation = state.engine.generate_with_chat_params(
         &mut context,
-        &tokens,
+        &input.tokens,
         input.options,
         &stop,
         &mut sink,
-        &chat_params,
+        &input.chat_params,
     )?;
-    let parsed = chat_params
+    let parsed = input
+        .chat_params
         .parse(&generation.text, false)
         .unwrap_or_else(|_| generation.text.clone());
     let result = parse_tool_response(&parsed, &generation.text, input.tools, input.choice);
@@ -737,19 +745,23 @@ fn handle_completions(state: Arc<ServerState>, request: Request, generation_tick
         api_request.model.clone()
     };
     let system = state.default_options.system.clone();
+    let guard = generation_ticket.acquire();
+    let mut messages = vec![message];
+    let tokens = match state
+        .engine
+        .prepare(&mut messages, system.as_deref(), options.max_tokens)
+    {
+        Ok((tokens, _)) => tokens,
+        Err(error) => {
+            respond_error(request, prompt_error_status(&error), &error);
+            return;
+        }
+    };
     let completion_id = text_completion_id();
     let created = openai::now_unix();
 
     let mut sink = NullSink;
-    match generate_chat(
-        &state,
-        generation_ticket,
-        system,
-        vec![message],
-        &options,
-        &stop,
-        &mut sink,
-    ) {
+    match generate_chat(&state, guard, tokens, &options, &stop, &mut sink) {
         Ok(generation) => {
             let body = serde_json::to_string(&TextCompletionResponse {
                 id: completion_id,
@@ -776,22 +788,24 @@ fn handle_completions(state: Arc<ServerState>, request: Request, generation_tick
 
 fn generate_chat(
     state: &ServerState,
-    ticket: QueueTicket,
-    system: Option<String>,
-    mut messages: Vec<ChatMessage>,
+    _guard: QueueGuard,
+    tokens: Vec<LlamaToken>,
     options: &ChatOptions,
     stop: &[String],
     sink: &mut dyn TextSink,
 ) -> Result<Generation, String> {
-    let _guard = ticket.acquire();
     let mut context = state.engine.new_context()?;
-    let (tokens, _dropped) =
-        state
-            .engine
-            .prepare(&mut messages, system.as_deref(), options.max_tokens)?;
     state
         .engine
         .generate(&mut context, &tokens, options, stop, sink)
+}
+
+fn prompt_error_status(error: &str) -> u16 {
+    if error.starts_with("Input plus reserved generation tokens exceeds the model context limit") {
+        400
+    } else {
+        500
+    }
 }
 
 // ---- sinks ----
@@ -1025,6 +1039,17 @@ mod tests {
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn prompt_context_overflow_maps_to_bad_request() {
+        assert_eq!(
+            prompt_error_status(
+                "Input plus reserved generation tokens exceeds the model context limit of 64"
+            ),
+            400
+        );
+        assert_eq!(prompt_error_status("Failed to render prompt"), 500);
     }
 
     #[test]
