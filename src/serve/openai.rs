@@ -337,6 +337,21 @@ pub(crate) fn parse_tool_response(
         return ToolResponse::Calls(calls);
     }
 
+    if let Some(calls) = parse_generated_tool_calls(raw_text) {
+        let valid_calls: Vec<_> = calls
+            .into_iter()
+            .filter(|call| {
+                !matches!(choice, ResolvedToolChoice::None)
+                    && tools
+                        .iter()
+                        .any(|tool| tool.function.name == call.function.name)
+            })
+            .collect();
+        if !valid_calls.is_empty() {
+            return ToolResponse::Calls(valid_calls);
+        }
+    }
+
     ToolResponse::Text(
         parsed_message
             .as_ref()
@@ -348,11 +363,15 @@ pub(crate) fn parse_tool_response(
 
 pub(crate) fn parse_generated_tool_calls(text: &str) -> Option<Vec<ToolCall>> {
     let json = extract_generated_tool_call_json(text)?;
-    let message = serde_json::from_str::<ParsedAssistantMessage>(json).ok()?;
-    let calls = message.tool_calls?;
-    if calls.is_empty() {
-        return None;
-    }
+    let calls: Vec<ParsedToolCall> = serde_json::from_str::<ParsedAssistantMessage>(json)
+        .ok()
+        .and_then(|message| message.tool_calls)
+        .filter(|calls| !calls.is_empty())
+        .or_else(|| {
+            serde_json::from_str::<ParsedToolCall>(json)
+                .ok()
+                .map(|call| vec![call])
+        })?;
     calls
         .iter()
         .map(|call| {
@@ -386,14 +405,13 @@ pub(crate) fn parse_generated_tool_calls(text: &str) -> Option<Vec<ToolCall>> {
 
 fn extract_generated_tool_call_json(text: &str) -> Option<&str> {
     let mut text = text.trim();
-    if let Some(body) = text.strip_prefix("```json") {
-        text = body;
-    } else if let Some(body) = text.strip_prefix("```") {
-        text = body;
-    }
-    text = text.trim();
-    if let Some(body) = text.strip_suffix("```") {
-        text = body.trim();
+    if text.starts_with("```") {
+        if let Some(body) = text.strip_prefix("```json") {
+            text = body;
+        } else if let Some(body) = text.strip_prefix("```") {
+            text = body;
+        }
+        text = text.trim();
     }
 
     let start = text.find('{')?;
@@ -1020,6 +1038,27 @@ mod tests {
         assert_eq!(fenced[0].function.arguments, r#"{"city":"Tokyo"}"#);
         assert_eq!(verbose[0].function.name, "time");
         assert_eq!(verbose[0].function.arguments, r#"{"zone":"UTC"}"#);
+    }
+
+    #[test]
+    fn parses_generated_tool_calls_in_flat_format() {
+        let flat = parse_generated_tool_calls(r#"{"name":"weather","arguments":{"city":"Tokyo"}}"#)
+            .unwrap();
+        let flat_function = parse_generated_tool_calls(
+            r#"{"function":{"name":"time","arguments":{"zone":"UTC"}}}"#,
+        )
+        .unwrap();
+        let fenced_flat = parse_generated_tool_calls(
+            "```json\n{\"name\":\"weather\",\"arguments\":{\"city\":\"Tokyo\"}}\n```",
+        )
+        .unwrap();
+
+        assert_eq!(flat[0].function.name, "weather");
+        assert_eq!(flat[0].function.arguments, r#"{"city":"Tokyo"}"#);
+        assert_eq!(flat_function[0].function.name, "time");
+        assert_eq!(flat_function[0].function.arguments, r#"{"zone":"UTC"}"#);
+        assert_eq!(fenced_flat[0].function.name, "weather");
+        assert_eq!(fenced_flat[0].function.arguments, r#"{"city":"Tokyo"}"#);
     }
 
     #[test]
