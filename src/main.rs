@@ -158,7 +158,7 @@ Usage:\n\
   wolf help                                  Show this help\n\
 \n\
 Chat options:\n\
-  --threads N          Number of inference threads (backend default)\n\
+  --threads N          Number of inference threads (default: physical core count)\n\
   --max-tokens N       Maximum tokens to generate per turn (default: 256)\n\
   --ctx-size N         Context window size in tokens (default: 8192)\n\
   --max-cache-mb N     Maximum KV prefix cache size in MiB (default: 256; 0 disables)\n\

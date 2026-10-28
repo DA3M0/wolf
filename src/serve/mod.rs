@@ -31,12 +31,12 @@ pub fn serve(options: ServeOptions, chat_options: ChatOptions) -> Result<(), Str
         ));
     }
 
-    chat::configure_threads(chat_options.threads)?;
+    let threads = chat::resolve_threads(chat_options.threads);
     eprintln!("Loading model: {}", model_path.display());
 
     let engine = Engine::load(
         &model_path,
-        chat_options.threads,
+        Some(threads),
         chat_options.max_cache_mb,
         chat_options.ctx_size,
     )?;

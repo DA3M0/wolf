@@ -722,6 +722,7 @@ pub(crate) struct ToolCall {
     pub(crate) function: ToolCallFunction,
 }
 
+#[cfg(test)]
 #[derive(Debug, Serialize)]
 pub(crate) struct ChatCompletionChunk {
     pub(crate) id: String,
@@ -731,6 +732,7 @@ pub(crate) struct ChatCompletionChunk {
     pub(crate) choices: Vec<ChunkChoice>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Serialize)]
 pub(crate) struct ChunkChoice {
     pub(crate) index: usize,
@@ -739,6 +741,7 @@ pub(crate) struct ChunkChoice {
     pub(crate) finish_reason: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Serialize)]
 pub(crate) struct ChunkDelta {
     #[serde(skip_serializing_if = "Option::is_none")]

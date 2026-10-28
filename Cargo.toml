@@ -1,6 +1,6 @@
 [package]
 name = "wolf"
-version = "1.5.2"
+version = "1.5.3"
 edition = "2024"
 description = "Local LLM chat and model inspection CLI powered by llama.cpp"
 license = "Apache-2.0"
@@ -26,11 +26,12 @@ rocm = ["llama-cpp-4/hip"]
 metal = ["llama-cpp-4/metal"]
 
 [dependencies]
+bytes = "1"
 ctrlc = "3"
 encoding_rs = "0.8"
 llama-cpp-4 = { version = "0.8.0", default-features = false }
 memmap2 = "0.9.11"
-rayon = "1.12.0"
+num_cpus = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.145"
 tiny_http = "0.12"

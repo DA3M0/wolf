@@ -4,8 +4,10 @@ use crate::chat::{Engine, Generation, TextSink};
 use crate::options::ChatOptions;
 use crate::serve::openai::{self, *};
 use crate::serve::queue::{QueueGuard, QueueTicket};
+use bytes::Bytes;
 use llama_cpp_4::chat::ToolChoice as LlamaToolChoice;
 use llama_cpp_4::prelude::{ChatParams, LlamaToken};
+use serde::Serialize;
 use std::io::{self, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,7 +55,7 @@ pub(crate) fn handle(
 
     // /health is auth-free so probes and load balancers can check liveness.
     if method == Method::Get && path == "/health" {
-        respond_json(request, StatusCode(200), &health_body());
+        respond_json(request, StatusCode(200), health_body());
         return;
     }
 
@@ -67,15 +69,15 @@ pub(crate) fn handle(
     }
 
     match route(&method, path) {
-        Ok(RouteEnum::Health) => respond_json(request, StatusCode(200), &health_body()),
+        Ok(RouteEnum::Health) => respond_json(request, StatusCode(200), health_body()),
         Ok(RouteEnum::ListModels) => {
             let body = model_list_string(&state);
-            respond_json(request, StatusCode(200), &body);
+            respond_json(request, StatusCode(200), body);
         }
         Ok(RouteEnum::GetModel(id)) => {
             if id == state.model_id {
                 let body = single_model_string(&state);
-                respond_json(request, StatusCode(200), &body);
+                respond_json(request, StatusCode(200), body);
             } else {
                 respond_error(
                     request,
@@ -106,24 +108,6 @@ pub(crate) fn handle(
                 "Endpoint not found."
             },
         ),
-    }
-}
-
-struct DisconnectSink {
-    disconnected: Arc<AtomicBool>,
-}
-
-impl TextSink for DisconnectSink {
-    fn push(&mut self, _text: &str) -> Result<(), String> {
-        if self.disconnected.load(Ordering::Relaxed) {
-            Err("Client disconnected".to_string())
-        } else {
-            Ok(())
-        }
-    }
-
-    fn interrupted(&mut self) -> bool {
-        self.disconnected.load(Ordering::Relaxed)
     }
 }
 
@@ -256,8 +240,8 @@ fn json_headers() -> Vec<Header> {
     headers
 }
 
-fn respond_json(request: Request, status: StatusCode, body: &str) {
-    let data = body.to_string().into_bytes();
+fn respond_json(request: Request, status: StatusCode, body: String) {
+    let data = body.into_bytes();
     let len = data.len();
     let response = Response::new(
         status,
@@ -271,7 +255,7 @@ fn respond_json(request: Request, status: StatusCode, body: &str) {
 
 fn respond_error(request: Request, status: u16, message: &str) {
     let body = error_body(status, message);
-    respond_json(request, StatusCode(status), &body);
+    respond_json(request, StatusCode(status), body);
 }
 
 fn read_body(request: &mut Request) -> io::Result<Vec<u8>> {
@@ -383,22 +367,15 @@ fn handle_chat_completions(
             }
         };
         if api_request.stream {
-            let heartbeat_frame = match sse_frame(
-                &completion_id,
-                created,
-                &model,
-                None,
-                Some(String::new()),
-                None,
-                None,
-            ) {
-                Ok(frame) => frame,
-                Err(error) => {
-                    respond_error(request, 500, &error);
-                    return;
-                }
-            };
-            let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(SSE_CHANNEL_CAPACITY);
+            let heartbeat_frame =
+                match sse_frame(&completion_id, created, &model, None, Some(""), None, None) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        respond_error(request, 500, &error);
+                        return;
+                    }
+                };
+            let (tx, rx) = mpsc::sync_channel::<Bytes>(SSE_CHANNEL_CAPACITY);
             let response = sse_response(rx, heartbeat_frame, None);
             let gen_state = Arc::clone(&state);
             let requested_tools = tools.clone();
@@ -425,7 +402,7 @@ fn handle_chat_completions(
                                     None,
                                     None,
                                     None,
-                                    Some(generation.finish_reason.as_str().to_string()),
+                                    Some(generation.finish_reason.as_str()),
                                 )
                             })
                             .and_then(|()| sink.send_done());
@@ -437,9 +414,7 @@ fn handle_chat_completions(
                         let mut sink = SseSink::new(tx, completion_id, created, model);
                         let result = sink
                             .send_tool_calls(&calls)
-                            .and_then(|()| {
-                                sink.send_chunk(None, None, None, Some("tool_calls".to_string()))
-                            })
+                            .and_then(|()| sink.send_chunk(None, None, None, Some("tool_calls")))
                             .and_then(|()| sink.send_done());
                         if let Err(error) = result {
                             eprintln!("Failed to send tool-call SSE response: {error}");
@@ -447,7 +422,7 @@ fn handle_chat_completions(
                     }
                     Err(error) => {
                         let sink = SseSink::new(tx, completion_id, created, model);
-                        let _ = sink.send_chunk(None, None, None, Some("server_error".to_string()));
+                        let _ = sink.send_chunk(None, None, None, Some("server_error"));
                         let _ = sink.send_done();
                         eprintln!("Tool-call generation failed: {error}");
                     }
@@ -493,7 +468,7 @@ fn handle_chat_completions(
                         usage: Usage::new(generation.prompt_tokens, generation.generated_tokens),
                     })
                     .unwrap_or_default();
-                    respond_json(request, StatusCode(200), &body);
+                    respond_json(request, StatusCode(200), body);
                 }
                 Err(error) => respond_error(request, 500, &error),
             }
@@ -515,42 +490,33 @@ fn handle_chat_completions(
     };
 
     if api_request.stream {
-        let heartbeat_frame = match sse_frame(
-            &completion_id,
-            created,
-            &model,
-            None,
-            Some(String::new()),
-            None,
-            None,
-        ) {
-            Ok(frame) => frame,
-            Err(error) => {
-                respond_error(request, 500, &error);
-                return;
-            }
-        };
-        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(SSE_CHANNEL_CAPACITY);
+        let heartbeat_frame =
+            match sse_frame(&completion_id, created, &model, None, Some(""), None, None) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    respond_error(request, 500, &error);
+                    return;
+                }
+            };
+        let (tx, rx) = mpsc::sync_channel::<Bytes>(SSE_CHANNEL_CAPACITY);
         let disconnected = Arc::new(AtomicBool::new(false));
         let response = sse_response(rx, heartbeat_frame, Some(Arc::clone(&disconnected)));
         let gen_state = Arc::clone(&state);
         std::thread::spawn(move || {
-            let mut sink = DisconnectSink { disconnected };
+            let mut sink =
+                SseSink::new_with_disconnect(tx, completion_id, created, model, disconnected);
             let result = generate_chat(&gen_state, guard, tokens, &options, &stop, &mut sink);
             match result {
                 Ok(generation) => {
-                    let mut sink = SseSink::new(tx, completion_id, created, model);
-                    if let Err(err) = send_chat_generation(
-                        &mut sink,
-                        &generation.text,
-                        generation.finish_reason.as_str(),
-                    ) {
+                    if let Err(err) = sink
+                        .send_chunk(None, None, None, Some(generation.finish_reason.as_str()))
+                        .and_then(|()| sink.send_done())
+                    {
                         eprintln!("Failed to send chat SSE response: {err}");
                     }
                 }
                 Err(err) => {
-                    let sink = SseSink::new(tx, completion_id, created, model);
-                    let _ = sink.send_chunk(None, None, None, Some("server_error".to_string()));
+                    let _ = sink.send_chunk(None, None, None, Some("server_error"));
                     let _ = sink.send_done();
                     eprintln!("Generation failed: {err}");
                 }
@@ -580,7 +546,7 @@ fn handle_chat_completions(
                     usage: Usage::new(generation.prompt_tokens, generation.generated_tokens),
                 })
                 .unwrap_or_default();
-                respond_json(request, StatusCode(200), &body);
+                respond_json(request, StatusCode(200), body);
             }
             Err(err) => {
                 respond_error(request, 500, &err);
@@ -597,17 +563,6 @@ fn chat_completion_parts(
         Some(calls) => (None, Some(calls), "tool_calls".to_string()),
         None => (Some(text.to_string()), None, finish_reason.to_string()),
     }
-}
-
-fn send_chat_generation(sink: &mut SseSink, text: &str, finish_reason: &str) -> Result<(), String> {
-    if let Some(calls) = parse_generated_tool_calls(text) {
-        sink.send_tool_calls(&calls)?;
-        sink.send_chunk(None, None, None, Some("tool_calls".to_string()))?;
-    } else {
-        sink.push(text)?;
-        sink.send_chunk(None, None, None, Some(finish_reason.to_string()))?;
-    }
-    sink.send_done()
 }
 
 fn build_tool_prompt_inputs(
@@ -776,7 +731,7 @@ fn handle_completions(state: Arc<ServerState>, request: Request, generation_tick
                 usage: Usage::new(generation.prompt_tokens, generation.generated_tokens),
             })
             .unwrap_or_default();
-            respond_json(request, StatusCode(200), &body);
+            respond_json(request, StatusCode(200), body);
         }
         Err(err) => {
             respond_error(request, 500, &err);
@@ -820,30 +775,52 @@ impl TextSink for NullSink {
 
 /// 流式 SSE 输出目标:把每段文本封装成 OpenAI 格式的 `data:` 帧。
 struct SseSink {
-    tx: SyncSender<Vec<u8>>,
+    tx: SyncSender<Bytes>,
     id: String,
     created: u64,
     model: String,
     first: bool,
+    disconnected: Option<Arc<AtomicBool>>,
 }
 
 impl SseSink {
-    fn new(tx: SyncSender<Vec<u8>>, id: String, created: u64, model: String) -> Self {
+    fn new(tx: SyncSender<Bytes>, id: String, created: u64, model: String) -> Self {
+        Self::new_inner(tx, id, created, model, None)
+    }
+
+    fn new_with_disconnect(
+        tx: SyncSender<Bytes>,
+        id: String,
+        created: u64,
+        model: String,
+        disconnected: Arc<AtomicBool>,
+    ) -> Self {
+        Self::new_inner(tx, id, created, model, Some(disconnected))
+    }
+
+    fn new_inner(
+        tx: SyncSender<Bytes>,
+        id: String,
+        created: u64,
+        model: String,
+        disconnected: Option<Arc<AtomicBool>>,
+    ) -> Self {
         Self {
             tx,
             id,
             created,
             model,
             first: true,
+            disconnected,
         }
     }
 
     fn send_chunk(
         &self,
         role: Option<&'static str>,
-        content: Option<String>,
+        content: Option<&str>,
         tool_calls: Option<Vec<ToolCallDelta>>,
-        finish_reason: Option<String>,
+        finish_reason: Option<&str>,
     ) -> Result<(), String> {
         self.tx
             .send(sse_frame(
@@ -879,9 +856,36 @@ impl SseSink {
 
     fn send_done(&self) -> Result<(), String> {
         self.tx
-            .send(b"data: [DONE]\n\n".to_vec())
+            .send(Bytes::from_static(b"data: [DONE]\n\n"))
             .map_err(|_| "Client disconnected".to_string())
     }
+}
+
+#[derive(Serialize)]
+struct SseChunk<'a> {
+    id: &'a str,
+    object: &'static str,
+    created: u64,
+    model: &'a str,
+    choices: [SseChunkChoice<'a>; 1],
+}
+
+#[derive(Serialize)]
+struct SseChunkChoice<'a> {
+    index: usize,
+    delta: SseChunkDelta<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finish_reason: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct SseChunkDelta<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
 fn sse_frame(
@@ -889,18 +893,18 @@ fn sse_frame(
     created: u64,
     model: &str,
     role: Option<&'static str>,
-    content: Option<String>,
+    content: Option<&str>,
     tool_calls: Option<Vec<ToolCallDelta>>,
-    finish_reason: Option<String>,
-) -> Result<Vec<u8>, String> {
-    let chunk = ChatCompletionChunk {
-        id: id.to_string(),
+    finish_reason: Option<&str>,
+) -> Result<Bytes, String> {
+    let chunk = SseChunk {
+        id,
         object: "chat.completion.chunk",
         created,
-        model: model.to_string(),
-        choices: vec![ChunkChoice {
+        model,
+        choices: [SseChunkChoice {
             index: 0,
-            delta: ChunkDelta {
+            delta: SseChunkDelta {
                 role,
                 content,
                 tool_calls,
@@ -908,9 +912,12 @@ fn sse_frame(
             finish_reason,
         }],
     };
-    let json = serde_json::to_string(&chunk)
+    let mut frame = Vec::with_capacity(192 + content.map_or(0, str::len));
+    frame.extend_from_slice(b"data: ");
+    serde_json::to_writer(&mut frame, &chunk)
         .map_err(|error| format!("Failed to serialize SSE frame: {error}"))?;
-    Ok(format!("data: {json}\n\n").into_bytes())
+    frame.extend_from_slice(b"\n\n");
+    Ok(Bytes::from(frame))
 }
 
 impl TextSink for SseSink {
@@ -918,18 +925,34 @@ impl TextSink for SseSink {
         if text.is_empty() {
             return Ok(());
         }
+        if self
+            .disconnected
+            .as_ref()
+            .is_some_and(|disconnected| disconnected.load(Ordering::Relaxed))
+        {
+            return Err("Client disconnected".to_string());
+        }
         let role = self.first.then_some("assistant");
         self.first = false;
-        let content = Some(text.to_string());
-        self.send_chunk(role, content, None, None)
+        self.send_chunk(role, Some(text), None, None)
+    }
+
+    fn capture_text(&self) -> bool {
+        false
+    }
+
+    fn interrupted(&mut self) -> bool {
+        self.disconnected
+            .as_ref()
+            .is_some_and(|disconnected| disconnected.load(Ordering::Relaxed))
     }
 }
 
 // ---- SSE reader ----
 
 fn sse_response(
-    receiver: Receiver<Vec<u8>>,
-    heartbeat_frame: Vec<u8>,
+    receiver: Receiver<Bytes>,
+    heartbeat_frame: Bytes,
     disconnected: Option<Arc<AtomicBool>>,
 ) -> Response<ChannelReader> {
     let mut headers = cors_headers();
@@ -949,19 +972,18 @@ fn sse_response(
 }
 
 struct ChannelReader {
-    receiver: Receiver<Vec<u8>>,
-    heartbeat_frame: Vec<u8>,
+    receiver: Receiver<Bytes>,
+    heartbeat_frame: Bytes,
     heartbeat_interval: Duration,
     disconnected: Arc<AtomicBool>,
-    waiting_for_first_chunk: bool,
-    current: Vec<u8>,
+    current: Bytes,
     offset: usize,
 }
 
 impl ChannelReader {
     fn new(
-        receiver: Receiver<Vec<u8>>,
-        heartbeat_frame: Vec<u8>,
+        receiver: Receiver<Bytes>,
+        heartbeat_frame: Bytes,
         heartbeat_interval: Duration,
     ) -> Self {
         Self::new_with_disconnect(
@@ -973,8 +995,8 @@ impl ChannelReader {
     }
 
     fn new_with_disconnect(
-        receiver: Receiver<Vec<u8>>,
-        heartbeat_frame: Vec<u8>,
+        receiver: Receiver<Bytes>,
+        heartbeat_frame: Bytes,
         heartbeat_interval: Duration,
         disconnected: Arc<AtomicBool>,
     ) -> Self {
@@ -983,8 +1005,7 @@ impl ChannelReader {
             heartbeat_frame,
             heartbeat_interval,
             disconnected,
-            waiting_for_first_chunk: true,
-            current: Vec::new(),
+            current: Bytes::new(),
             offset: 0,
         }
     }
@@ -1001,31 +1022,34 @@ impl Read for ChannelReader {
         if buf.is_empty() {
             return Ok(0);
         }
-        while self.offset >= self.current.len() {
-            if self.waiting_for_first_chunk {
-                match self.receiver.recv_timeout(self.heartbeat_interval) {
-                    Ok(chunk) => {
-                        self.waiting_for_first_chunk = false;
-                        self.current = chunk;
+        let mut written = 0;
+        while written < buf.len() {
+            if self.offset >= self.current.len() {
+                let next = if written == 0 {
+                    match self.receiver.recv_timeout(self.heartbeat_interval) {
+                        Ok(chunk) => Some(chunk),
+                        Err(RecvTimeoutError::Timeout) => Some(self.heartbeat_frame.clone()),
+                        Err(RecvTimeoutError::Disconnected) => return Ok(0),
                     }
-                    Err(RecvTimeoutError::Timeout) => {
-                        self.current = self.heartbeat_frame.clone();
+                } else {
+                    match self.receiver.try_recv() {
+                        Ok(chunk) => Some(chunk),
+                        Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => None,
                     }
-                    Err(RecvTimeoutError::Disconnected) => return Ok(0),
-                }
-            } else {
-                match self.receiver.recv() {
-                    Ok(chunk) => self.current = chunk,
-                    Err(_) => return Ok(0),
-                }
+                };
+                let Some(next) = next else {
+                    break;
+                };
+                self.current = next;
+                self.offset = 0;
             }
-            self.offset = 0;
+            let remaining = &self.current[self.offset..];
+            let n = remaining.len().min(buf.len() - written);
+            buf[written..written + n].copy_from_slice(&remaining[..n]);
+            self.offset += n;
+            written += n;
         }
-        let remaining = &self.current[self.offset..];
-        let n = remaining.len().min(buf.len());
-        buf[..n].copy_from_slice(&remaining[..n]);
-        self.offset += n;
-        Ok(n)
+        Ok(written)
     }
 }
 
@@ -1089,7 +1113,8 @@ mod tests {
     #[test]
     fn channel_reader_eof_on_disconnect() {
         let (tx, rx) = mpsc::sync_channel(1);
-        let mut reader = ChannelReader::new(rx, b"heartbeat".to_vec(), Duration::from_secs(1));
+        let mut reader =
+            ChannelReader::new(rx, Bytes::from_static(b"heartbeat"), Duration::from_secs(1));
         let mut buf = [0u8; 16];
         // dropping tx → EOF
         drop(tx);
@@ -1100,9 +1125,10 @@ mod tests {
     #[test]
     fn channel_reader_pumps_chunks() {
         let (tx, rx) = mpsc::sync_channel(1);
-        let mut reader = ChannelReader::new(rx, b"heartbeat".to_vec(), Duration::from_secs(1));
+        let mut reader =
+            ChannelReader::new(rx, Bytes::from_static(b"heartbeat"), Duration::from_secs(1));
         let mut buf = [0u8; 4];
-        tx.send(b"hello".to_vec()).unwrap();
+        tx.send(Bytes::from_static(b"hello")).unwrap();
         let n = reader.read(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"hell");
         let n = reader.read(&mut buf).unwrap();
@@ -1110,17 +1136,37 @@ mod tests {
     }
 
     #[test]
+    fn channel_reader_batches_ready_chunks() {
+        let (tx, rx) = mpsc::sync_channel(4);
+        let mut reader =
+            ChannelReader::new(rx, Bytes::from_static(b"heartbeat"), Duration::from_secs(1));
+        tx.send(Bytes::from_static(b"one")).unwrap();
+        tx.send(Bytes::from_static(b"two")).unwrap();
+        let mut buf = [0u8; 16];
+
+        let n = reader.read(&mut buf).unwrap();
+
+        assert_eq!(&buf[..n], b"onetwo");
+    }
+
+    #[test]
     fn dropping_reader_unblocks_sse_sink() {
         let (tx, rx) = mpsc::sync_channel(1);
-        tx.send(b"queued".to_vec()).unwrap();
-        let reader = ChannelReader::new(rx, b"heartbeat".to_vec(), Duration::from_secs(1));
-        let mut sink = SseSink {
+        tx.send(Bytes::from_static(b"queued")).unwrap();
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let reader = ChannelReader::new_with_disconnect(
+            rx,
+            Bytes::from_static(b"heartbeat"),
+            Duration::from_secs(1),
+            Arc::clone(&disconnected),
+        );
+        let mut sink = SseSink::new_with_disconnect(
             tx,
-            id: "test".to_string(),
-            created: 0,
-            model: "test".to_string(),
-            first: true,
-        };
+            "test".to_string(),
+            0,
+            "test".to_string(),
+            disconnected,
+        );
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let sender = std::thread::spawn(move || {
             done_tx.send(sink.push("token").is_err()).unwrap();
@@ -1136,34 +1182,38 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_sink_stops_generation_after_reader_drop() {
+    fn sse_sink_stops_generation_after_reader_drop() {
+        let (tx, rx) = mpsc::sync_channel(1);
         let disconnected = Arc::new(AtomicBool::new(false));
-        let mut sink = DisconnectSink {
-            disconnected: Arc::clone(&disconnected),
-        };
+        let reader = ChannelReader::new_with_disconnect(
+            rx,
+            Bytes::from_static(b"heartbeat"),
+            Duration::from_secs(1),
+            Arc::clone(&disconnected),
+        );
+        let mut sink =
+            SseSink::new_with_disconnect(tx, "test".into(), 0, "test".into(), disconnected);
         assert!(sink.push("token").is_ok());
-        disconnected.store(true, Ordering::Relaxed);
-        assert!(sink.interrupted());
+        drop(reader);
         assert_eq!(sink.push("token"), Err("Client disconnected".to_string()));
     }
 
     #[test]
-    fn channel_reader_sends_heartbeat_until_first_chunk() {
+    fn channel_reader_sends_heartbeat_when_idle() {
         let (tx, rx) = mpsc::sync_channel(1);
-        let heartbeat =
-            sse_frame("test", 1, "test", None, Some(String::new()), None, None).unwrap();
+        let heartbeat = sse_frame("test", 1, "test", None, Some(""), None, None).unwrap();
         let mut reader = ChannelReader::new(rx, heartbeat.clone(), Duration::from_millis(10));
         let mut buf = [0u8; 512];
 
         let n = reader.read(&mut buf).unwrap();
-        assert_eq!(&buf[..n], heartbeat);
+        assert_eq!(&buf[..n], heartbeat.as_ref());
         assert!(heartbeat.starts_with(b"data: "));
         assert!(heartbeat.ends_with(b"\n\n"));
         let payload = std::str::from_utf8(&heartbeat[6..heartbeat.len() - 2]).unwrap();
         let chunk: serde_json::Value = serde_json::from_str(payload).unwrap();
         assert_eq!(chunk["choices"][0]["delta"]["content"], "");
 
-        tx.send(b"data: token\n\n".to_vec()).unwrap();
+        tx.send(Bytes::from_static(b"data: token\n\n")).unwrap();
         let n = reader.read(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"data: token\n\n");
         drop(tx);
@@ -1204,50 +1254,35 @@ mod tests {
     }
 
     #[test]
-    fn chat_stream_converts_complete_tool_json_instead_of_emitting_content() {
+    fn chat_stream_emits_each_generated_chunk_without_copying_text() {
         let (tx, rx) = mpsc::sync_channel(4);
         let mut sink = SseSink::new(tx, "chatcmpl-test".to_string(), 1, "test".to_string());
-        let text = r#"{"tool_calls":[{"name":"weather","arguments":{"city":"Tokyo"}}]}"#;
-        send_chat_generation(&mut sink, text, "stop").unwrap();
-
-        let call_frame = rx.try_recv().unwrap();
-        let call_json = std::str::from_utf8(&call_frame[6..call_frame.len() - 2]).unwrap();
-        let call_chunk: serde_json::Value = serde_json::from_str(call_json).unwrap();
-        let delta = &call_chunk["choices"][0]["delta"];
-        assert_eq!(delta["tool_calls"][0]["type"], "function");
-        assert_eq!(delta["tool_calls"][0]["function"]["name"], "weather");
-        assert_eq!(
-            delta["tool_calls"][0]["function"]["arguments"],
-            r#"{"city":"Tokyo"}"#
-        );
-        assert!(delta.get("content").is_none());
-
-        let finish_frame = rx.try_recv().unwrap();
-        let finish_json = std::str::from_utf8(&finish_frame[6..finish_frame.len() - 2]).unwrap();
-        let finish_chunk: serde_json::Value = serde_json::from_str(finish_json).unwrap();
-        assert_eq!(finish_chunk["choices"][0]["finish_reason"], "tool_calls");
-        assert_eq!(rx.try_recv().unwrap(), b"data: [DONE]\n\n");
-    }
-
-    #[test]
-    fn chat_stream_keeps_non_tool_output_as_content() {
-        let (tx, rx) = mpsc::sync_channel(4);
-        let mut sink = SseSink::new(tx, "chatcmpl-test".to_string(), 1, "test".to_string());
-        send_chat_generation(&mut sink, "plain response", "stop").unwrap();
+        assert!(!sink.capture_text());
+        sink.push("plain ").unwrap();
+        sink.push("response").unwrap();
+        sink.send_chunk(None, None, None, Some("stop")).unwrap();
+        sink.send_done().unwrap();
 
         let content_frame = rx.try_recv().unwrap();
         let content_json = std::str::from_utf8(&content_frame[6..content_frame.len() - 2]).unwrap();
         let content_chunk: serde_json::Value = serde_json::from_str(content_json).unwrap();
+        assert_eq!(content_chunk["choices"][0]["delta"]["content"], "plain ");
+
+        let next_content_frame = rx.try_recv().unwrap();
+        let next_content_json =
+            std::str::from_utf8(&next_content_frame[6..next_content_frame.len() - 2]).unwrap();
+        let next_content_chunk: serde_json::Value =
+            serde_json::from_str(next_content_json).unwrap();
         assert_eq!(
-            content_chunk["choices"][0]["delta"]["content"],
-            "plain response"
+            next_content_chunk["choices"][0]["delta"]["content"],
+            "response"
         );
 
         let finish_frame = rx.try_recv().unwrap();
         let finish_json = std::str::from_utf8(&finish_frame[6..finish_frame.len() - 2]).unwrap();
         let finish_chunk: serde_json::Value = serde_json::from_str(finish_json).unwrap();
         assert_eq!(finish_chunk["choices"][0]["finish_reason"], "stop");
-        assert_eq!(rx.try_recv().unwrap(), b"data: [DONE]\n\n");
+        assert_eq!(rx.try_recv().unwrap().as_ref(), b"data: [DONE]\n\n");
     }
 
     #[test]
@@ -1278,6 +1313,7 @@ mod tests {
             created: 0,
             model: "test".to_string(),
             first: true,
+            disconnected: None,
         };
 
         sink.push("").unwrap();

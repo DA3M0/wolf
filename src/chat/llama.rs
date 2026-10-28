@@ -48,6 +48,10 @@ pub trait TextSink {
     fn finish(&mut self) -> std::result::Result<(), String> {
         Ok(())
     }
+    /// Whether generated text should be accumulated in [`Generation::text`].
+    fn capture_text(&self) -> bool {
+        true
+    }
     /// 是否应中断本轮生成(CLI 的 Ctrl-C);服务端由 [`TextSink::push`] 报错表示断开。
     fn interrupted(&mut self) -> bool {
         false
@@ -96,7 +100,7 @@ pub struct Engine {
     backend: LlamaBackend,
     stop_markers: Vec<String>,
     context_size: u32,
-    threads: Option<usize>,
+    threads: usize,
     max_prefix_cache_bytes: usize,
     prefix_cache: Mutex<Option<PrefixSnapshot>>,
 }
@@ -109,6 +113,7 @@ impl Engine {
         max_cache_mb: Option<usize>,
         ctx_size: usize,
     ) -> std::result::Result<Self, String> {
+        let threads = super::resolve_threads(threads);
         let max_prefix_cache_bytes = max_cache_mb
             .unwrap_or(256)
             .checked_mul(1024 * 1024)
@@ -142,11 +147,9 @@ impl Engine {
     pub fn new_context(&self) -> std::result::Result<LlamaContext<'_>, String> {
         let mut context_params =
             LlamaContextParams::default().with_n_ctx(NonZeroU32::new(self.context_size));
-        if let Some(threads) = self.threads {
-            let threads = i32::try_from(threads)
-                .map_err(|_| "--threads exceeds the range supported by llama.cpp.".to_string())?;
-            context_params = context_params.with_n_threads(threads);
-        }
+        let threads = i32::try_from(self.threads)
+            .map_err(|_| "--threads exceeds the range supported by llama.cpp.".to_string())?;
+        context_params = context_params.with_n_threads(threads);
         self.model
             .new_context(&self.backend, context_params)
             .map_err(|error| format!("Failed to create llama.cpp inference context: {error}"))
@@ -423,6 +426,7 @@ impl Engine {
         let mut stop_sequence = StopSequence::new(stop_markers);
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut answer = String::new();
+        let capture_text = sink.capture_text();
         let mut finish_reason = FinishReason::Length;
         let mut position = i32::try_from(prompt.len()).map_err(|_| {
             "Input token count exceeds the range supported by llama.cpp.".to_string()
@@ -461,7 +465,9 @@ impl Engine {
                 );
             }
             let (text, stopped) = stop_sequence.push(&text);
-            answer.push_str(&text);
+            if capture_text {
+                answer.push_str(&text);
+            }
             sink.push(&text)?;
             generated += 1;
             if stopped {
@@ -490,10 +496,14 @@ impl Engine {
             return Err("UTF-8 decoding buffer is too small for the model response.".to_string());
         }
         let (final_text, _) = stop_sequence.push(&final_text);
-        answer.push_str(&final_text);
+        if capture_text {
+            answer.push_str(&final_text);
+        }
         sink.push(&final_text)?;
         let remaining = stop_sequence.finish();
-        answer.push_str(&remaining);
+        if capture_text {
+            answer.push_str(&remaining);
+        }
         sink.push(&remaining)?;
         sink.finish()?;
 

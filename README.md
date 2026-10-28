@@ -125,7 +125,7 @@ Goodbye.
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--threads N` | llama.cpp default | Number of threads for GGUF inference |
+| `--threads N` | Physical core count | Number of threads for GGUF inference |
 | `--max-tokens N` | 256 | Maximum number of tokens to generate per turn |
 | `--ctx-size N` | 8192 | Inference context window size in tokens |
 | `--max-cache-mb N` | 256 | Maximum size in MiB of a saved KV prefix-cache snapshot; snapshots larger than the limit are not cached, and `0` disables prefix caching |
