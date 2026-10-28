@@ -245,6 +245,8 @@ pub(crate) fn build_chat_messages(
 ) -> Result<PreparedChat, ApiError> {
     let mut system_parts = Vec::new();
     let mut messages = Vec::new();
+    // Keep system/developer content separate because llama.cpp receives it as template-level system context.
+    // 将 system/developer 内容单独收集，因为 llama.cpp 会把它作为模板级系统上下文传入。
     for message in &request.messages {
         if let Some(calls) = &message.tool_calls {
             if message.role != "assistant" {
@@ -308,6 +310,8 @@ pub(crate) fn parse_tool_response(
     tools: &[ToolDefinition],
     choice: &ResolvedToolChoice,
 ) -> ToolResponse {
+    // Prefer the model template's parsed form, then accept compatible raw JSON shapes before falling back to text.
+    // 优先使用模型模板解析结果，再兼容原始 JSON 工具调用格式；均无法识别时保留为普通文本。
     let parsed_message = serde_json::from_str::<ParsedAssistantMessage>(parsed).ok();
     let nested_message = parsed_message
         .as_ref()
@@ -457,6 +461,8 @@ fn convert_tool_calls(
 }
 
 fn normalize_tool_arguments(arguments: &Value) -> Option<String> {
+    // OpenAI accepts arguments as an object or JSON-encoded object string; normalize both for the response.
+    // OpenAI 参数既可能是对象，也可能是 JSON 字符串；这里统一校验并序列化为对象文本。
     let arguments = match arguments {
         Value::String(value) => serde_json::from_str(value).ok()?,
         Value::Object(_) => arguments.clone(),
@@ -473,6 +479,8 @@ pub(crate) fn resolve_tool_choice(
     tools: &Option<Vec<ToolDefinition>>,
     tool_choice: &Option<ToolChoice>,
 ) -> Result<Option<ResolvedToolChoice>, ApiError> {
+    // Validate declarations and selection together so an invalid choice never reaches model generation.
+    // 同时校验工具声明与选择项，避免无效请求进入模型生成阶段。
     let Some(tools) = tools else {
         return match tool_choice {
             None => Ok(None),

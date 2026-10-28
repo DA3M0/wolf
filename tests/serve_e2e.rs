@@ -31,6 +31,8 @@ fn serve_openai_compatible_api() {
         );
     }
 
+    // Use an ephemeral port so parallel test runs do not contend for a fixed listener.
+    // 使用系统分配的临时端口，避免并行测试争抢固定监听端口。
     let bin = std::env!("CARGO_BIN_EXE_wolf");
     let mut child = Command::new(bin)
         .args([
@@ -225,7 +227,8 @@ fn send_http(
     key: Option<&str>,
     body: Option<&serde_json::Value>,
 ) -> (u16, String) {
-    // Parse http://host:port/path
+    // Parse the small set of plain-HTTP URLs constructed by this test helper.
+    // 解析此测试辅助函数构造的简单 HTTP URL。
     let rest = &url["http://".len()..];
     let (host_port, path) = rest.split_once('/').unwrap_or((rest, ""));
     let (host, port) = host_port.rsplit_once(':').unwrap_or((host_port, "80"));

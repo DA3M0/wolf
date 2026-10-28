@@ -54,6 +54,7 @@ pub(crate) fn handle(
     let path = if path.is_empty() { "/" } else { path };
 
     // /health is auth-free so probes and load balancers can check liveness.
+    // /health 不要求鉴权，便于健康探针和负载均衡器检查服务状态。
     if method == Method::Get && path == "/health" {
         respond_json(request, StatusCode(200), health_body());
         return;
@@ -175,6 +176,8 @@ fn authorized(request: &Request, expected: Option<&str>) -> bool {
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    // Compare every byte when lengths match to avoid leaking the first differing position.
+    // 长度相同时遍历所有字节，避免通过首个差异位置泄露令牌内容。
     if a.len() != b.len() {
         return false;
     }
@@ -333,6 +336,8 @@ fn handle_chat_completions(
     let completion_id = completion_id();
     let created = openai::now_unix();
 
+    // Tool-enabled requests need llama.cpp's template-aware parser and grammar; ordinary chat uses the direct path.
+    // 含工具请求需要 llama.cpp 的模板解析和语法约束；普通聊天走直接提示词路径。
     if let (Some(tool_choice), Some(tools)) = (tool_choice, api_request.tools.as_ref()) {
         let (messages_json, tools_json) = match build_tool_prompt_inputs(
             &api_request,
@@ -1025,6 +1030,8 @@ impl Read for ChannelReader {
         let mut written = 0;
         while written < buf.len() {
             if self.offset >= self.current.len() {
+                // Wait only when the caller has received no bytes; otherwise return queued data promptly.
+                // 仅在本次尚未返回数据时等待；已有数据时及时返回，避免阻塞流式响应。
                 let next = if written == 0 {
                     match self.receiver.recv_timeout(self.heartbeat_interval) {
                         Ok(chunk) => Some(chunk),

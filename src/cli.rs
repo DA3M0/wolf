@@ -82,6 +82,8 @@ pub fn parse_chat_args(
     let mut options = ChatOptions::default();
     let mut context = ContextCliOptions::default();
     let mut index = 0;
+    // Track explicit inference flags separately so restored archives can distinguish defaults from overrides.
+    // 单独记录用户显式传入的推理参数，以便恢复归档时区分默认值与命令行覆盖值。
     while index < args.len() {
         match args[index].as_str() {
             "--threads" => {
@@ -240,6 +242,8 @@ pub fn parse_serve_args(args: &[String]) -> Result<(ServeOptions, ChatOptions), 
     let mut options = ChatOptions::default();
     let mut max_concurrent_generations_specified = false;
     let mut index = 0;
+    // Serve accepts both a positional model and the legacy --model flag, but never both.
+    // 服务命令同时兼容位置模型参数和旧式 --model 标志，但不允许二者同时出现。
     while index < args.len() {
         match args[index].as_str() {
             "--model" => {
@@ -527,6 +531,8 @@ fn parse_bounded_float_option(
     min: f64,
     max: f64,
 ) -> Result<f64, RunError> {
+    // Range::contains also rejects NaN, which cannot be meaningfully ordered or used for sampling.
+    // 范围检查也会拒绝 NaN，因为它既无法可靠比较，也不适合作为采样参数。
     let value = parse_float_raw(args, index, option)?;
     if !(min..=max).contains(&value) {
         return Err(RunError::usage(format!(

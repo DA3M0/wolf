@@ -168,6 +168,8 @@ impl Engine {
             "Model context length exceeds the range supported by this platform.".to_string()
         })?;
         let mut dropped_turns = 0;
+        // Re-render after each whole-turn removal so truncation respects the model's actual chat template.
+        // 每次移除完整对话轮次后重新套用模板，确保截断长度基于模型实际提示格式计算。
         loop {
             let mut prompt_messages =
                 Vec::with_capacity(messages.len() + usize::from(system.is_some()));
@@ -348,6 +350,8 @@ impl Engine {
             return Err("Failed to convert input to model tokens; please try again.".into());
         }
         let mut batch = LlamaBatch::new(BATCH_SIZE, 1);
+        // Serialize access to the shared snapshot; each request still owns its own llama.cpp context.
+        // 共享快照的读写由互斥锁串行化；每个请求仍独占自己的 llama.cpp 上下文。
         let mut cache = self
             .prefix_cache
             .lock()
@@ -380,6 +384,8 @@ impl Engine {
         }
         drop(cache);
 
+        // Cache only the prompt prefix: the final prompt token is needed to produce the first output token.
+        // 只缓存提示词前缀：最后一个提示 token 仍需参与解码，才能得到首个生成 token。
         let cache_target_len = prompt.len().saturating_sub(1);
         let mut replacement_snapshot = None;
         if cache_target_len > reused_prefix_len {
@@ -849,6 +855,8 @@ impl StopSequence {
             return (visible, true);
         }
 
+        // Hold back suffixes that may be the beginning of a stop marker split across token chunks.
+        // 暂存可能构成停止标记前缀的尾部文本，处理标记被拆分到多个 token 的情况。
         let mut held_len = 0;
         for marker in &self.markers {
             let max_prefix_len = self.pending.len().min(marker.len() - 1);

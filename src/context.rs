@@ -85,6 +85,8 @@ impl ContextArchive {
         requested_options: &ChatOptions,
         options_specified: bool,
     ) -> Result<ChatOptions, String> {
+        // Bind a saved conversation to the canonical model path to avoid silently resuming on another model.
+        // 使用规范化后的模型路径绑定会话，避免无提示地在另一模型上恢复历史记录。
         ensure_gguf_path(model_path)?;
         let resolved_path = model_path.canonicalize().map_err(|error| {
             format!(
@@ -164,6 +166,8 @@ impl ContextStore {
         let target = Self::archive_path(&directory, &archive.name)?;
         let bytes = serde_json::to_vec_pretty(&archive)
             .map_err(|error| format!("Failed to serialize context '{}': {error}", archive.name))?;
+        // Stage the complete archive in a private sibling file before replacing the target.
+        // 先将完整归档写入权限受限的同目录临时文件，再替换目标文件。
         let (temp_path, mut file) = loop {
             let temp_path = Self::temporary_path(&directory, &archive.name);
             let mut open_options = OpenOptions::new();
@@ -238,6 +242,8 @@ impl ContextStore {
             }
             archives.push(archive);
         }
+        // Stable ordering makes the CLI listing predictable across filesystem implementations.
+        // 显式排序可让 CLI 列表在不同文件系统上保持一致。
         archives.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(archives)
     }

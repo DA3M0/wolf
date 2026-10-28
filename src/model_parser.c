@@ -130,6 +130,8 @@ static char *duplicate_bytes(const uint8_t *value, size_t length) {
     if (copy == NULL) return NULL;
     for (index = 0; index < length; index++) {
         if (value[index] == 0) {
+            /* Preserve embedded NULs with a sentinel because C strings are NUL-terminated.
+             * C 字符串以 NUL 结尾，因此用专用标记保留文件中的嵌入 NUL。 */
             copy[output_index++] = (char)0xff;
             copy[output_index++] = (char)0xfe;
         } else {
@@ -244,6 +246,8 @@ static int buffer_append_json_string(Buffer *buffer, const char *value) {
     }
     while (*cursor != 0) {
         if (cursor[0] == 0xff && cursor[1] == 0xfe) {
+            /* Restore the sentinel from duplicate_bytes as a JSON \u0000 escape.
+             * 将 duplicate_bytes 使用的标记还原为 JSON 的 \u0000 转义。 */
             if (!buffer_append(buffer, "\\u0000")) return 0;
             cursor += 2;
             continue;
@@ -377,6 +381,8 @@ static int valid_utf8(const uint8_t *data, size_t length) {
 }
 
 static int reader_take(Reader *reader, size_t count, const uint8_t **value) {
+    /* Check arithmetic overflow and file bounds before advancing the binary reader.
+     * 先检查加法溢出和文件边界，再推进二进制读取游标。 */
     if (count > SIZE_MAX - reader->position ||
         reader->position + count > reader->length) {
         set_error(&reader->error, "Unexpected end of GGUF file; the file may be corrupted.");
@@ -527,6 +533,8 @@ static int reader_metadata_value(Reader *reader, uint32_t type, char **value,
         char count_text[64];
         if (!reader_u32(reader, &element_type) ||
             !reader_count(reader, "array elements", &count)) return 0;
+        /* Consume every array element to keep the reader aligned, even though output stores only a summary.
+         * 即使输出仅保留摘要，也必须读取全部数组元素以保持后续字段偏移正确。 */
         for (index = 0; index < count; index++) {
             char *ignored = NULL;
             if (!reader_metadata_value(reader, element_type, &ignored, depth + 1)) {
@@ -677,6 +685,8 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
     if (!reader_count(&reader, "tensors", &tensor_count) ||
         !reader_count(&reader, "metadata entries", &metadata_count)) goto failed;
 
+    /* Read metadata first because general.alignment determines the start of the tensor data section.
+     * 先读取元数据，因为 general.alignment 决定张量数据区的起始位置。 */
     for (index = 0; index < metadata_count; index++) {
         char *key = NULL;
         char *value = NULL;
@@ -820,6 +830,8 @@ static int parse_gguf(const uint8_t *data, size_t length, Model *model, char **e
         }
     }
 
+    /* Align past the descriptors, then validate each tensor's offset relative to the data section.
+     * 描述表结束后对齐到张量数据区，再统一校验各张量的相对偏移。 */
     if (!align_up((uint64_t)reader.position, alignment, &data_start)) {
         set_error(&reader.error, "GGUF data section offset overflow.");
         goto failed;
@@ -1297,6 +1309,8 @@ static int parse_safetensors(const uint8_t *data, size_t length, Model *model, c
         set_error(error, "Safetensors file is missing the header length.");
         return 0;
     }
+    /* The first 8 bytes encode the header length; tensor offsets are relative to the payload.
+     * 文件前 8 字节编码头长度；张量偏移以其后的 payload 起点为基准。 */
     header_length_u64 = 0;
     for (index = 0; index < 8; index++) {
         header_length_u64 |= (uint64_t)data[index] << (index * 8);
@@ -1439,6 +1453,8 @@ static int parse_safetensors(const uint8_t *data, size_t length, Model *model, c
             start, end, model->tensors[model->tensor_count - 1].name, index
         };
     }
+    /* Sorting by start offset makes adjacent comparisons sufficient to detect every overlap.
+     * 按起始偏移排序后，只需比较相邻区间即可发现所有重叠。 */
     if (key_count > 1) qsort(ranges, key_count, sizeof(Range), compare_ranges);
     for (index = 1; index < key_count; index++) {
         if (ranges[index - 1].end > ranges[index].start) {

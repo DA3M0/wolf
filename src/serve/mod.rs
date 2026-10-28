@@ -15,6 +15,8 @@ use std::time::Duration;
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 pub fn serve(options: ServeOptions, chat_options: ChatOptions) -> Result<(), String> {
+    // Refuse unauthenticated non-loopback listeners to prevent accidental network exposure.
+    // 未启用鉴权时拒绝监听非回环地址，避免服务意外暴露到网络。
     if options.api_key.is_none() && !options.generate_key && !is_loopback(&options.host) {
         return Err(format!(
             "When serving on '{}', authentication must be enabled with --generate-key or --api-key.\n\
@@ -68,6 +70,8 @@ pub fn serve(options: ServeOptions, chat_options: ChatOptions) -> Result<(), Str
         .map_err(|error| format!("Failed to install Ctrl-C handler: {error}"))?;
 
     let created = openai::now_unix();
+    // Share immutable model state across request workers; the queue separately limits inference concurrency.
+    // 请求线程共享不可变模型状态；生成队列独立控制推理并发上限。
     let state = Arc::new(http::ServerState {
         engine: Arc::new(engine),
         default_options: chat_options,

@@ -26,6 +26,8 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Vec<String>) -> Result<(), RunError> {
+    // Dispatch the first argument to a subcommand, while preserving the legacy bare-model chat form.
+    // 将首个参数分派到子命令，同时保留直接传入模型路径启动聊天的旧用法。
     let Some(command) = args.first().map(String::as_str) else {
         print_help();
         return Ok(());
@@ -97,6 +99,8 @@ fn run_chat(
     requested_options: ChatOptions,
     context_options: cli::ContextCliOptions,
 ) -> Result<(), RunError> {
+    // A named archive supplies its saved options unless the caller explicitly provided chat options.
+    // 恢复已命名会话时默认采用归档选项；只有命令行显式指定推理参数时才进行一致性校验。
     let chat_options_specified = context_options.chat_options_specified;
     let store = ContextStore::new(context_options.directory);
     let archive = match context_options.name {
@@ -231,6 +235,8 @@ fn render_model(info: &ModelInfo, show_all: bool) -> String {
     }
     if !info.tensors.is_empty() {
         output.push_str("\nTensors:\n");
+        // Keep terminal output bounded by default; JSON export remains complete and machine-readable.
+        // 默认限制终端输出长度；JSON 报告仍包含全部张量，便于程序读取。
         let count = if show_all {
             info.tensors.len()
         } else {

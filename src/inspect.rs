@@ -61,6 +61,8 @@ impl Drop for CAllocation {
 pub fn inspect_model(path: &Path) -> Result<ModelInfo, String> {
     let file = std::fs::File::open(path)
         .map_err(|error| format!("Failed to open {}: {error}", path.display()))?;
+    // Model files can be large; memory mapping avoids eagerly copying the whole file into a second buffer.
+    // 模型文件通常很大；内存映射可避免将整个文件再复制到另一块缓冲区。
     let mmap = unsafe {
         memmap2::MmapOptions::new()
             .map(&file)
@@ -82,6 +84,8 @@ fn parse_model(data: &[u8]) -> Result<ParsedModel, String> {
     let mut json = std::ptr::null_mut();
     let mut error = std::ptr::null_mut();
     let success = unsafe { wolf_parse_model(data.as_ptr(), data.len(), &mut json, &mut error) };
+    // Wrap both C-owned outputs immediately so every return path releases them through the matching C allocator.
+    // 立即托管 C 分配的两个输出，确保所有返回路径都使用对应的 C 释放函数回收内存。
     let json = CAllocation(json);
     let error = CAllocation(error);
 

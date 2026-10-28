@@ -40,6 +40,8 @@ impl FifoQueue {
 
     fn acquire(self: &Arc<Self>, mut ticket: QueueTicket) -> QueueGuard {
         let mut state = self.lock_state();
+        // Ticket order preserves FIFO fairness while active tracks the configured parallelism limit.
+        // 票号顺序保证 FIFO 公平性，active 则记录当前并行推理数量。
         while state.serving != ticket.number || state.active >= self.max_active.get() {
             state = self
                 .changed
@@ -76,6 +78,8 @@ impl FifoQueue {
 }
 
 fn advance_cancelled(state: &mut QueueState) {
+    // Skip abandoned tickets only when they reach the head, so later requests cannot jump the queue.
+    // 只有取消票到达队首时才跳过，避免后续请求越过仍在等待的请求。
     while state.cancelled.remove(&state.serving) {
         state.serving = state.serving.wrapping_add(1);
     }

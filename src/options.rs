@@ -10,6 +10,8 @@ pub const DEFAULT_TOP_P: f64 = 0.9;
 pub const DEFAULT_REPEAT_PENALTY: f32 = 1.0;
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a concise assistant. Respond in English.";
 
+// Serde uses this function when loading archives written before ctx_size was introduced.
+// 反序列化缺少 ctx_size 的旧版会话归档时，Serde 会使用此默认值函数。
 fn default_context_tokens() -> usize {
     DEFAULT_CONTEXT_TOKENS
 }
